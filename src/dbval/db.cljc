@@ -696,7 +696,9 @@
   (cond
     (or (keyword? x)
         (symbol? x)
-        (string? x))
+        (string? x)
+        #?(:clj (instance? java.util.Date x)
+           :cljs false))
     (pr-str x)
 
     (sequential? x)
@@ -712,7 +714,9 @@
     (or (map? v)
         (keyword? v)
         (symbol? v)
-        (string? v))
+        (string? v)
+        #?(:clj (instance? java.util.Date v)
+           :cljs false))
     (pr-str v)
 
     (sequential? v)
