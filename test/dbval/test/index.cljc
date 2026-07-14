@@ -205,3 +205,22 @@
 
     (is (thrown-msg? "Attribute :alias should be marked as :db/index true"
           (d/index-range db :alias "e" "u")))))
+
+(deftest test-index-range-snapshot-isolation
+  ;; regression: -index-range used to omit the :max-tx filter, so a stale
+  ;; db snapshot could see datoms transacted after it was taken
+  (testing "datoms added after the snapshot are invisible"
+    (let [db1 (:db-after (d/with (d/empty-db {:age {:db/index true}})
+                           [{:db/id "e1" :age 10}]))
+          db2 (d/db-with db1 [{:db/id "e2" :age 20}])]
+      (is (= [10] (mapv :v (d/index-range db1 :age 0 100))))
+      (is (= [10 20] (mapv :v (d/index-range db2 :age 0 100))))))
+
+  (testing "datoms retracted after the snapshot are still visible"
+    (let [tx  (d/with (d/empty-db {:age {:db/index true}})
+                [{:db/id "e1" :age 10}])
+          db1 (:db-after tx)
+          e1  (get (:tempids tx) "e1")
+          db2 (d/db-with db1 [[:db/retract e1 :age 10]])]
+      (is (= [10] (mapv :v (d/index-range db1 :age 0 100))))
+      (is (= [] (mapv :v (d/index-range db2 :age 0 100)))))))

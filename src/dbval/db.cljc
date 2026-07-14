@@ -1209,11 +1209,14 @@
                                 [(serialize-value db attr end*)]))]
       (->Eduction
        (comp (map (bytes-to-datoms-xf db))
+             (filter (fn [datom]
+                       (uuid<= (:tx datom)
+                               (:max-tx db))))
              datoms-filter)
        (slice {:db db
                :begin begin
                :end end}))))
-                
+
   clojure.data/EqualityPartition
   (equality-partition [x] :dbval/db)
 
