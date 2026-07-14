@@ -168,6 +168,53 @@
     (is (thrown-msg? "Attribute :alias should be marked as :db/index true"
           (d/rseek-datoms db :avet :alias)))))
 
+(deftest test-rseek-datoms-with-history
+  ;; regression: -rseek-datoms fed a descending stream into datoms-filter,
+  ;; which assumes ascending order — retract tombstones leaked out, retracted
+  ;; datoms were returned and live datoms were dropped
+  (let [dvec #(vector (:a %) (:v %) (:added %))]
+    (testing "retracted datom is invisible, live datoms are kept"
+      (let [tx (d/with (d/empty-db)
+                 [{:db/id "e1" :name "Ivan" :age 30}])
+            e1 (get (:tempids tx) "e1")
+            db (d/db-with (:db-after tx) [[:db/retract e1 :age 30]])]
+        (is (= [[:name "Ivan" true]]
+              (map dvec (d/rseek-datoms db :eavt e1))))))
+
+    (testing "retracted and re-added datom is visible exactly once"
+      (let [tx (d/with (d/empty-db)
+                 [{:db/id "e1" :name "Ivan" :age 30}])
+            e1 (get (:tempids tx) "e1")
+            db (-> (:db-after tx)
+                 (d/db-with [[:db/retract e1 :age 30]])
+                 (d/db-with [[:db/add e1 :age 31]]))]
+        (is (= [[:name "Ivan" true] [:age 31 true]]
+              (map dvec (d/rseek-datoms db :eavt e1))))))
+
+    (testing "datom added and retracted in the same transaction is invisible"
+      (let [tx (d/with (d/empty-db)
+                 [{:db/id "e1" :name "Ivan"}])
+            e1 (get (:tempids tx) "e1")
+            db (d/db-with (:db-after tx)
+                 [[:db/add e1 :age 30]
+                  [:db/retract e1 :age 30]])]
+        (is (= [[:name "Ivan" true]]
+              (map dvec (d/rseek-datoms db :eavt e1))))))
+
+    (testing "rseek-datoms is the exact reverse of datoms"
+      (let [dvec+e #(vector (:e %) (:a %) (:v %) (:added %))
+            tx (d/with (d/empty-db {:age {:db/index true}})
+                 [{:db/id "e1" :name "Ivan" :age 30}
+                  {:db/id "e2" :name "Oleg" :age 40}])
+            e1 (get (:tempids tx) "e1")
+            db (-> (:db-after tx)
+                 (d/db-with [[:db/retract e1 :age 30]])
+                 (d/db-with [[:db/add e1 :age 31]]))]
+        (doseq [index [:eavt :aevt :avet]]
+          (is (= (reverse (map dvec+e (d/datoms db index)))
+                (map dvec+e (d/rseek-datoms db index)))
+            (str "index " index)))))))
+
 (deftest test-index-range
   (let [dvec #(vector (:e %) (:a %) (:v %))
         tx (d/with (d/empty-db {:name {:db/index true}

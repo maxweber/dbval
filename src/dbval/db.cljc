@@ -928,6 +928,42 @@
                  (rf result d1))
                ))))))))
 
+(defn datoms-filter-reverse
+  "Like `datoms-filter`, but for datoms arriving in descending index order,
+   as produced by a reverse `slice`.
+
+   `datoms-filter` relies on ascending order (a datom's `:db/retract`
+   directly follows its `:db/add`), so it cannot be applied to a descending
+   stream. Datoms that share the same `[e a v]` are still adjacent in a
+   descending stream, however, so each such group is buffered, restored to
+   ascending order and run through `datoms-filter`, which emits the
+   surviving `:db/add` datom, if any."
+  [rf]
+  (let [buffer      (volatile! [])
+        flush-group (fn [result]
+                      (let [group @buffer]
+                        (vreset! buffer [])
+                        (if-some [live (first (into [] datoms-filter (rseq group)))]
+                          (rf result live)
+                          result)))]
+    (fn
+      ([] (rf))
+      ([result]
+       (rf (unreduced (flush-group result))))
+      ([result d]
+       (let [prev (peek @buffer)]
+         (if (or (nil? prev)
+                 (and (= (:e prev) (:e d))
+                      (= (:a prev) (:a d))
+                      (= (:v prev) (:v d))))
+           (do
+             (vswap! buffer conj d)
+             result)
+           (let [result' (flush-group result)]
+             (when-not (reduced? result')
+               (vswap! buffer conj d))
+             result')))))))
+
 (defn sort-components
   [order [c0 c1 c2 c3]]
   (case order
@@ -1186,7 +1222,7 @@
              (filter (fn [datom]
                        (uuid<= (:tx datom)
                                (:max-tx db))))
-             datoms-filter)
+             datoms-filter-reverse)
        (slice {:db db
                :begin begin
                :end end
