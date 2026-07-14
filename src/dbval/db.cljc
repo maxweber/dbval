@@ -1256,21 +1256,14 @@
   clojure.data/EqualityPartition
   (equality-partition [x] :dbval/db)
 
+  ;; Implemented only to throw: without this extension `clojure.data/diff`
+  ;; would fall back to its default map implementation and diff the DB
+  ;; record's fields (:conn, :max-tx, :hash, ...), silently producing
+  ;; nonsense.
   clojure.data/Diff
   (diff-similar [a b]
-    (diff-sorted (-datoms a
-                          :eavt
-                          nil
-                          nil
-                          nil
-                          nil)
-                 (-datoms b
-                          :eavt
-                          nil
-                          nil
-                          nil
-                          nil)
-                 cmp-datoms-eav-quick)))
+    (throw (UnsupportedOperationException.
+             "clojure.data/diff is not supported on dbval databases, since it would realize both databases entirely in memory"))))
 
 (defn db? [x]
   #?(:clj

@@ -3,7 +3,8 @@
     [clojure.data]
     [clojure.test :as t :refer [is are deftest testing]]
     [dbval.core :as d]
-    [dbval.db :as db :refer [defrecord-updatable]]))
+    [dbval.db :as db :refer [defrecord-updatable]]
+    [dbval.test.core]))
 
 ;;
 ;; verify that defrecord-updatable works with compiler/core macro configuration
@@ -42,18 +43,15 @@
           (subs (str (d/squuid)) 0 8)))))
 
 (deftest test-diff
-  ;; With UUIDs, comparing datoms across different databases doesn't make sense
-  ;; since entity IDs are random. Test diff within same database evolution instead.
+  ;; clojure.data/diff is deliberately unsupported: dbval databases may not
+  ;; fit into memory, and a diff would have to realize both sides entirely.
+  ;; The DB record still extends clojure.data/Diff, but only to throw —
+  ;; otherwise diff would fall back to clojure.data's default map
+  ;; implementation and diff the record's fields.
   (let [tx1 (d/with (d/empty-db) [{:db/id "e1" :a 1 :b 2}])
         db1 (:db-after tx1)
         e1 (get (:tempids tx1) "e1")
         db2 (d/db-with db1 [[:db/retract e1 :b 2]
-                            [:db/add e1 :c 3]])
-        [only-db1 only-db2 common] (clojure.data/diff db1 db2)]
-    ;; Verify diff returns something sensible - the databases differ
-    (is (some? only-db1))
-    (is (some? only-db2))
-    ;; db1 has the :b datom that db2 doesn't have
-    (is (some #(= :b (:a %)) only-db1))
-    ;; db2 has the :c datom that db1 doesn't have
-    (is (some #(= :c (:a %)) only-db2))))
+                            [:db/add e1 :c 3]])]
+    (is (thrown-msg? "clojure.data/diff is not supported on dbval databases, since it would realize both databases entirely in memory"
+          (clojure.data/diff db1 db2)))))

@@ -1,7 +1,9 @@
 (ns dbval.test.issues
   (:require
+    [clojure.data]
     [dbval.core :as ds]
-    [clojure.test :as t :refer [is are deftest testing]]))
+    [clojure.test :as t :refer [is are deftest testing]]
+    [dbval.test.core]))
 
 (deftest ^{:doc "CLJS `apply` + `vector` will hold onto mutable array of arguments directly"}
   issue-262
@@ -27,18 +29,15 @@
 
 (deftest ^{:doc "Can't diff databases with different types of the same attribute"}
   issue-369
-  ;; Use fixed UUID for deterministic testing
+  ;; The original issue is moot: clojure.data/diff is deliberately
+  ;; unsupported on dbval databases (see dbval.test.db/test-diff).
   (let [eid #uuid "22222222-2222-2222-2222-222222222222"
         db1 (-> (ds/empty-db)
               (ds/db-with [[:db/add eid :attr :aa]]))
         db2 (-> (ds/empty-db)
-              (ds/db-with [[:db/add eid :attr "aa"]]))
-        [only-in-db1 only-in-db2 _common] (clojure.data/diff db1 db2)]
-    ;; Check that diff produces datoms with correct attribute values
-    (t/is (= 1 (count only-in-db1)))
-    (t/is (= :aa (:v (first only-in-db1))))
-    (t/is (= 1 (count only-in-db2)))
-    (t/is (= "aa" (:v (first only-in-db2))))))
+              (ds/db-with [[:db/add eid :attr "aa"]]))]
+    (t/is (thrown-msg? "clojure.data/diff is not supported on dbval databases, since it would realize both databases entirely in memory"
+            (clojure.data/diff db1 db2)))))
 
 (deftest ^{:doc "Expose a schema as a part of the public API."}
   issue-381
