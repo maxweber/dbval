@@ -6,7 +6,6 @@
     [dbval.inline :refer [update]]
     [dbval.lru :as lru]
     [dbval.store :as store]
-    [dbval.store.sqlite :as sqlite-store]
     [dbval.util :as util]
     [dbval.arrays :as arrays]
     [com.yetanalytics.squuid :as squuid])
@@ -1025,12 +1024,19 @@
                 (second))
         tx0)))
 
+(defn- default-store
+  "Builds the default SQLite-backed store. Loaded lazily: dbval ships no
+   storage driver, so the SQLite adapter (and its driver requirement) is
+   only touched when no explicit :store is given."
+  [opts]
+  ((requiring-resolve 'dbval.store.sqlite/store) opts))
+
 (defn ^DB empty-db [schema opts]
   {:pre [(or (nil? schema) (map? schema))]}
   (validate-schema schema)
   ;; TODO: consider how to close the store:
   (let [store (or (:store opts)
-                  (sqlite-store/store opts))
+                  (default-store opts))
         db    (DB. schema
                    tx0
                    (rschema (merge implicit-schema schema))

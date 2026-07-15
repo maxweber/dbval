@@ -40,6 +40,15 @@ dbval only needs the key portion. Consequently, you are dealing with a sorted
 set and Datascript's core is a
 [persistent-sorted-set](https://github.com/tonsky/persistent-sorted-set).
 
+The storage layer is pluggable via the `dbval.store` protocol: a store only
+has to provide ordered range scans over committed keys and atomic batch
+commits. `dbval.store.sqlite` is the default backend and
+`dbval.store.memory` provides an in-memory store for tests. Note that dbval
+ships no storage driver — to use the default SQLite store, add
+`org.xerial/sqlite-jdbc` to your dependencies (like with
+[next.jdbc](https://github.com/seancorfield/next-jdbc), you bring the driver
+for the store you pick).
+
 I first assumed that I need to make one part of a datom mutable, so that I can
 mark it as retracted. Until I discovered that the sorting of `t` in the Datomic
 indexes `:eavt`, `:aevt`, `:avet` and `:vaet` allows to figure out what the

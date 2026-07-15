@@ -32,10 +32,22 @@
                     (str/join "&"))]
     (str "jdbc:sqlite:" db-file (when (seq qs) (str "?" qs)))))
 
+(defn- load-driver! []
+  (try
+    (java.lang.Class/forName "org.sqlite.JDBC")
+    (catch ClassNotFoundException e
+      (throw (ex-info
+               (str "SQLite JDBC driver not found on the classpath. "
+                    "dbval ships no storage driver: add org.xerial/sqlite-jdbc "
+                    "to your dependencies to use the default SQLite store, "
+                    "or pass an explicit :store to empty-db "
+                    "(e.g. dbval.store.memory).")
+               {:error :store/missing-driver}
+               e)))))
+
 (defn- ^java.sql.Connection get-connection
   [db-file opts]
-  ;; explicitly load the driver class
-  (java.lang.Class/forName "org.sqlite.JDBC")
+  (load-driver!)
   (let [^String url (sqlite-jdbc-url db-file opts)]
     (java.sql.DriverManager/getConnection url)))
 
