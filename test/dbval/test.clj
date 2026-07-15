@@ -23,6 +23,7 @@
     dbval.test.pull-api
     dbval.test.pull-parser
     dbval.test.store
+    dbval.test.time-travel
     dbval.test.query
     dbval.test.query-aggregates
     dbval.test.query-find-specs

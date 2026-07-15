@@ -378,7 +378,7 @@
 
 (defn resolve-pattern-lookup-refs [source pattern]
   (if (satisfies? db/IDB source)
-    (let [[e a v tx] pattern
+    (let [[e a v tx added] pattern
           e'         (if (or (lookup-ref? e) (attr? e))
                        (db/entid-strict source e)
                        e)
@@ -388,7 +388,7 @@
           tx'        (if (lookup-ref? tx)
                        (db/entid-strict source tx)
                        tx)]
-      (subvec [e' a v' tx'] 0 (count pattern)))
+      (subvec [e' a v' tx' added] 0 (count pattern)))
     pattern))
 
 (defn lookup-pattern-db [context db pattern]
@@ -397,8 +397,14 @@
                          (substitute-constants context)
                          (resolve-pattern-lookup-refs db)
                          (mapv #(if (or (= % '_) (free-var? %)) nil %)))
-        datoms         (db/-search db search-pattern)
-        attr->prop     (->> (map vector pattern ["e" "a" "v" "tx"])
+        ;; like Datomic, a 5th pattern element binds the assert/retract flag
+        ;; (mostly useful on `history` dbs, where retract datoms are visible)
+        added          (nth search-pattern 4 nil)
+        datoms         (db/-search db (subvec search-pattern 0 (min 4 (count search-pattern))))
+        datoms         (if (some? added)
+                         (filter #(= (:added %) (boolean added)) datoms)
+                         datoms)
+        attr->prop     (->> (map vector pattern ["e" "a" "v" "tx" "added"])
                          (filter (fn [[s _]] (free-var? s)))
                          (into {}))]
     (Relation. attr->prop datoms)))

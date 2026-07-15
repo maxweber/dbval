@@ -538,18 +538,27 @@
                  (vreset! previous nil) ;; next step should ignore d2
                  result) ;; add nothing since datom was retracted in the same transaction.
 
+               ;; d2 is a retract unrelated to d1. In a full stream a
+               ;; retract directly follows its own add (handled above), but
+               ;; a `since` lower bound can orphan a retract by filtering
+               ;; out its add — d1 must not be swallowed by it.
                (not (:added d2))
                (do
                  ;; (prn "d2 retract" d1 d2)
                  (vreset! previous d2)
-                 result)
+                 (if (:added d1)
+                   (rf result d1)
+                   result))
 
                :else
                (do
                  ;; (prn "else" d1 d2)
                  (vreset! previous
                           d2)
-                 (rf result d1))
+                 ;; d1 can be an orphaned retract (see above) — never emit it
+                 (if (:added d1)
+                   (rf result d1)
+                   result))
                ))))))))
 
 (defn datoms-filter-reverse
@@ -587,6 +596,45 @@
              (when-not (reduced? result')
                (vswap! buffer conj d))
              result')))))))
+
+(defn tx-visibility-xform
+  "Composed transducer applying a db value's transaction visibility rules to
+   an ascending stream of datoms:
+
+   - upper bound: only datoms with `tx <= max-tx` are visible. This is what
+     makes a db an immutable value (and what `as-of` relies on, since
+     transaction squuids increase monotonically).
+   - optional lower bound: when `since-tx` is set, only datoms with
+     `tx > since-tx` are visible (see `since`).
+   - `datoms-filter` removes retracted datoms, unless `history?` is set, in
+     which case all datom versions (including retractions) are returned
+     (see `history`)."
+  [max-tx since-tx history?]
+  (apply comp
+         (concat
+          [(filter (fn [datom]
+                     (uuid<= (:tx datom)
+                             max-tx)))]
+          (when since-tx
+            [(filter (fn [datom]
+                       (pos? (compare (:tx datom) since-tx))))])
+          (when-not history?
+            [datoms-filter]))))
+
+(defn tx-visibility-xform-reverse
+  "Like `tx-visibility-xform`, for a descending stream of datoms (see
+   `datoms-filter-reverse`)."
+  [max-tx since-tx history?]
+  (apply comp
+         (concat
+          [(filter (fn [datom]
+                     (uuid<= (:tx datom)
+                             max-tx)))]
+          (when since-tx
+            [(filter (fn [datom]
+                       (pos? (compare (:tx datom) since-tx))))])
+          (when-not history?
+            [datoms-filter-reverse]))))
 
 (defn sort-components
   [order [c0 c1 c2 c3]]
@@ -663,7 +711,7 @@
 ;; `basis-tx` (and know which store they came from) — content-based value
 ;; semantics would have to realize a potentially larger-than-memory database.
 (deftype DB [schema max-tx rschema pull-patterns pull-attrs
-             store pending]
+             store pending as-of-tx since-tx history?]
 
 
   IDB
@@ -689,10 +737,7 @@
           ]
       (->Eduction
        (comp (map (bytes-to-datoms-xf db))
-             (filter (fn [datom]
-                       (uuid<= (:tx datom)
-                               max-tx)))
-             datoms-filter
+             (tx-visibility-xform max-tx since-tx history?)
              (filter (partial datom=
                               [e a v tx])))
        (slice {:db db
@@ -721,12 +766,9 @@
                              components)]
       (->Eduction
        (comp (map (bytes-to-datoms-xf db))
-               (filter (fn [datom]
-                         (uuid<= (:tx datom)
-                                 max-tx)))
-               datoms-filter
-               (filter (partial datom=
-                                [e a v tx])))
+             (tx-visibility-xform max-tx since-tx history?)
+             (filter (partial datom=
+                              [e a v tx])))
        (slice {:db db
                :begin begin
                :end end}))))
@@ -751,10 +793,7 @@
           [_begin end] (tuple-range (name index))]
       (->Eduction
        (comp (map (bytes-to-datoms-xf db))
-             (filter (fn [datom]
-                       (uuid<= (:tx datom)
-                               max-tx)))
-             datoms-filter)
+             (tx-visibility-xform max-tx since-tx history?))
        (slice {:db db
                :begin begin
                :end end}))))
@@ -780,10 +819,7 @@
           [begin _end] (tuple-range (name index))]
       (->Eduction
        (comp (map (bytes-to-datoms-xf db))
-             (filter (fn [datom]
-                       (uuid<= (:tx datom)
-                               max-tx)))
-             datoms-filter-reverse)
+             (tx-visibility-xform-reverse max-tx since-tx history?))
        (slice {:db db
                :begin begin
                :end end
@@ -806,10 +842,7 @@
                                 [(serialize-value db attr end*)]))]
       (->Eduction
        (comp (map (bytes-to-datoms-xf db))
-             (filter (fn [datom]
-                       (uuid<= (:tx datom)
-                               max-tx)))
-             datoms-filter)
+             (tx-visibility-xform max-tx since-tx history?))
        (slice {:db db
                :begin begin
                :end end}))))
@@ -896,14 +929,83 @@
   [^DB db max-tx]
   (DB. (.-schema db) max-tx (.-rschema db)
        (.-pull-patterns db) (.-pull-attrs db)
-       (.-store db) (.-pending db)))
+       (.-store db) (.-pending db)
+       (.-as-of-tx db) (.-since-tx db) (.-history? db)))
+
+(declare with-pending)
+
+(defn- coerce-tx
+  "Coerces `t` — a transaction squuid or an instant — to a transaction id."
+  [t]
+  (cond
+    (uuid? t) t
+    (inst? t) (squuid/time->uuid t)
+    :else     (util/raise "Expected a transaction UUID or an instant, got " t
+                          {:error :time-point/syntax, :t t})))
+
+(defn ^DB as-of
+  "Returns the value of the database as of transaction t (a transaction
+   squuid or an instant). Since transaction squuids increase strictly
+   monotonically, the as-of view is the same database value with its basis
+   bounded to t — every index read filters datoms accordingly (see
+   `tx-visibility-xform`)."
+  [^DB db t]
+  {:pre [(instance? DB db)]}
+  (let [tx (coerce-tx t)]
+    (DB. (.-schema db) tx (.-rschema db)
+         (.-pull-patterns db) (.-pull-attrs db)
+         (.-store db) (.-pending db)
+         tx (.-since-tx db) (.-history? db))))
+
+(defn as-of-t
+  "Returns the as-of transaction of a database view created by `as-of`, or
+   nil if db is not an as-of view."
+  [db]
+  (.-as-of-tx (unfiltered-db db)))
+
+(defn ^DB since
+  "Returns a value of the database containing only datoms asserted after
+   transaction t (exclusive). t is a transaction squuid or an instant."
+  [^DB db t]
+  {:pre [(instance? DB db)]}
+  (DB. (.-schema db) (.-max-tx db) (.-rschema db)
+       (.-pull-patterns db) (.-pull-attrs db)
+       (.-store db) (.-pending db)
+       (.-as-of-tx db) (coerce-tx t) (.-history? db)))
+
+(defn since-t
+  "Returns the since transaction of a database view created by `since`, or
+   nil if db is not a since view."
+  [db]
+  (.-since-tx (unfiltered-db db)))
+
+(defn ^DB history
+  "Returns a value of the database containing all datom versions, including
+   retractions (`datoms-filter` is skipped, see `tx-visibility-xform`).
+   Datoms report assertion vs retraction via their `:added` flag."
+  [^DB db]
+  {:pre [(instance? DB db)]}
+  (DB. (.-schema db) (.-max-tx db) (.-rschema db)
+       (.-pull-patterns db) (.-pull-attrs db)
+       (.-store db) (.-pending db)
+       (.-as-of-tx db) (.-since-tx db) true))
+
+(defn temporal-view?
+  "True if db is an as-of, since, or history view. Temporal views are
+   read-only: they cannot be transacted against."
+  [db]
+  (let [^DB db (unfiltered-db db)]
+    (boolean (or (.-as-of-tx db)
+                 (.-since-tx db)
+                 (.-history? db)))))
 
 (defn- ^DB with-pending
   "Copy of `db` with a different pending overlay (nil to clear)."
   [^DB db pending]
   (DB. (.-schema db) (.-max-tx db) (.-rschema db)
        (.-pull-patterns db) (.-pull-attrs db)
-       (.-store db) pending))
+       (.-store db) pending
+       (.-as-of-tx db) (.-since-tx db) (.-history? db)))
 
 ;; ----------------------------------------------------------------------------
 
@@ -1043,7 +1145,7 @@
                    (lru/cache 100)
                    (lru/cache 100)
                    store
-                   nil)]
+                   nil nil nil nil)]
     (with-max-tx db (q-max-tx db))))
 
 (defrecord TxReport [db-before db-after tx-data tempids tx-meta])
@@ -1086,7 +1188,10 @@
        (lru/cache 100)
        (lru/cache 100)
        (.-store db)
-       (.-pending db)))
+       (.-pending db)
+       (.-as-of-tx db)
+       (.-since-tx db)
+       (.-history? db)))
 
 
 (do
@@ -2170,12 +2275,25 @@
               (sequential? es))
     (util/raise "Bad transaction data " es ", expected sequential collection"
       {:error :transact/syntax, :tx-data es}))
-  (let [tx-id   (squuid/generate-squuid)
+  (when (temporal-view? (:db-before report))
+    (util/raise "Cannot transact against an as-of/since/history database value"
+      {:error :transact/temporal-view}))
+  (let [dry-run? (::dry-run report)
+        tx-id   (squuid/generate-squuid)
         ;; The pending overlay collects this transaction's keys; reads during
         ;; the transaction merge it over the store (see `slice`), so nothing
         ;; touches the store until the final atomic commit — an exception
         ;; while transacting simply discards the overlay.
         pending (java.util.TreeSet. ^java.util.Comparator store/byte-array-comparator)
+        ;; Carry over speculative datoms when chaining a dry-run on a dry-run
+        ;; db-after, so they stay visible in the new speculative view. A real
+        ;; transact must not inherit them: they were never committed and would
+        ;; go missing from storage.
+        _ (when-some [^java.util.NavigableSet prev (db-pending (:db-after report))]
+            (if dry-run?
+              (.addAll ^java.util.TreeSet pending prev)
+              (util/raise "Cannot transact against a speculative (dry-run) database value"
+                {:error :transact/speculative-view})))
         report' (-> report
                     (assoc ::tx-id tx-id)
                     ;; Set max-tx to current tx-id so datoms added during this
@@ -2186,8 +2304,15 @@
         ;; Pre-populate tempids with the tempid -> UUID mapping
         report'' (update report' :tempids merge id-map)
         result   (transact-tx-data-impl report'' tx-data)]
-    (store/commit! (db-store (:db-after result)) (seq pending))
-    (-> result
-        (update :db-after with-pending nil)
-        ;; Add :tx field with the transaction UUID
-        (assoc :tx tx-id))))
+    (if dry-run?
+      ;; Speculative transaction: nothing is written to the store. Keep the
+      ;; pending overlay on db-after so reads see the new datoms via `slice`.
+      (-> result
+          (dissoc ::dry-run)
+          (assoc :tx tx-id))
+      (do
+        (store/commit! (db-store (:db-after result)) (seq pending))
+        (-> result
+            (update :db-after with-pending nil)
+            ;; Add :tx field with the transaction UUID
+            (assoc :tx tx-id))))))

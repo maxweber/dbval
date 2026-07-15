@@ -206,6 +206,36 @@
        :doc "Returns a schema of a database."}
   schema db/-schema)
 
+(def ^{:arglists '([db tx-data] [db tx-data tx-meta])}
+  with-dry-run
+  "Like [[with]], but speculative: the transaction is validated and applied to the returned :db-after value in memory only — nothing is written to storage. Chaining another dry-run on the returned :db-after keeps the previous speculative datoms visible; a real transact against a speculative db value throws."
+  conn/with-dry-run)
+
+(def ^{:arglists '([db t])}
+  as-of
+  "Returns the value of the database as of transaction t (a transaction squuid or an instant). As-of views are read-only."
+  db/as-of)
+
+(def ^{:arglists '([db])}
+  as-of-t
+  "Returns the as-of transaction of a db view created by [[as-of]], or nil."
+  db/as-of-t)
+
+(def ^{:arglists '([db t])}
+  since
+  "Returns a value of the database containing only datoms asserted after transaction t (exclusive). t is a transaction squuid or an instant. Since views are read-only."
+  db/since)
+
+(def ^{:arglists '([db])}
+  since-t
+  "Returns the since transaction of a db view created by [[since]], or nil."
+  db/since-t)
+
+(def ^{:arglists '([db])}
+  history
+  "Returns a value of the database containing all datom versions, including retractions. Datoms report assertion vs retraction via their :added flag; a 5th element in a query pattern binds it (e.g. [?e :age ?a _ ?added]). History views are read-only."
+  db/history)
+
 (def ^{:arglists '([db])
        :doc "Returns the transaction id (the basis) up to which this database value sees the store.
 
