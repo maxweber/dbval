@@ -1,10 +1,18 @@
-(ns dbval.bench.datascript
+(ns dbval.bench.run
+  "Benchmarks for dbval.
+
+   Two kinds of benchmarks:
+
+   - Transaction benchmarks (`add-*`, `init`, `retract-5`) replay all
+     transactions against a fresh store on every iteration, because a db
+     snapshot cannot be transacted against once its store has moved on.
+     They use the small `*people1k` dataset and run with `*batch*` 1.
+     Note: every iteration creates a temporary SQLite file.
+
+   - Query/read benchmarks build a store once and only read from it."
   (:require
    [dbval.core :as d]
-   [dbval.bench.bench :as bench]
-   #?(:clj [jsonista.core :as jsonista])))
-
-#?(:cljs (enable-console-print!))
+   [dbval.bench.bench :as bench]))
 
 (def schema
   {:id      {:db/unique :db.unique/identity}
@@ -12,106 +20,133 @@
              :db/cardinality :db.cardinality/many}
    :alias   {:db/cardinality :db.cardinality/many}})
 
-(def empty-db (d/empty-db schema))
-
-(def *db100k
+(def *db20k
   (delay
     (d/db-with (d/empty-db schema) @bench/*people20k)))
 
 (defn wide-db [depth width]
-  (d/db-with empty-db (bench/wide-db 1 depth width)))
+  (d/db-with (d/empty-db schema) (bench/wide-db 1 depth width)))
 
 (defn long-db [depth width]
-  (d/db-with empty-db (bench/long-db depth width)))
+  (d/db-with (d/empty-db schema) (bench/long-db depth width)))
+
+;; transactions
 
 (defn bench-add-1 []
-  (bench/bench
-    (reduce
-      (fn [db p]
-        (-> db
-          (d/db-with [[:db/add (:db/id p) :name      (:name p)]])
-          (d/db-with [[:db/add (:db/id p) :last-name (:last-name p)]])
-          (d/db-with [[:db/add (:db/id p) :sex       (:sex p)]])
-          (d/db-with [[:db/add (:db/id p) :age       (:age p)]])
-          (d/db-with [[:db/add (:db/id p) :salary    (:salary p)]])))
-      empty-db
-      @bench/*people20k)))
+  (binding [bench/*batch* 1]
+    (bench/bench "add-1"
+      (reduce
+        (fn [db p]
+          (-> db
+            (d/db-with [[:db/add (:db/id p) :name      (:name p)]])
+            (d/db-with [[:db/add (:db/id p) :last-name (:last-name p)]])
+            (d/db-with [[:db/add (:db/id p) :sex       (:sex p)]])
+            (d/db-with [[:db/add (:db/id p) :age       (:age p)]])
+            (d/db-with [[:db/add (:db/id p) :salary    (:salary p)]])))
+        (d/empty-db schema)
+        @bench/*people1k))))
 
 (defn bench-add-5 []
-  (bench/bench
-    (reduce
-      (fn [db p]
-        (d/db-with db [p]))
-      empty-db
-      @bench/*people20k)))
+  (binding [bench/*batch* 1]
+    (bench/bench "add-5"
+      (reduce
+        (fn [db p]
+          (d/db-with db [p]))
+        (d/empty-db schema)
+        @bench/*people1k))))
 
 (defn bench-add-all []
-  (bench/bench
-    (d/db-with
-      empty-db
-      @bench/*people20k)))
+  (binding [bench/*batch* 1]
+    (bench/bench "add-all"
+      (d/db-with
+        (d/empty-db schema)
+        @bench/*people1k))))
 
 (defn bench-init []
-  (let [datoms (into []
-                 (for [p @bench/*people20k
-                       :let [id (#?(:clj Integer/parseInt :cljs js/parseInt) (:db/id p))]
+  (let [eids   (into {}
+                 (map (fn [p] [(:db/id p) (random-uuid)]))
+                 @bench/*people1k)
+        datoms (into []
+                 (for [p @bench/*people1k
+                       :let [id (eids (:db/id p))]
                        [k v] p
-                       :when (not= k :db/id)]
+                       :when (not= k :db/id)
+                       ;; explode cardinality-many values into datoms,
+                       ;; like transacting the map would
+                       v (if (sequential? v) v [v])]
                    (d/datom id k v)))]
-    (bench/bench
-      (d/init-db datoms))))
-
-(defn bench-find-datoms []
-  (bench/bench
-    (doseq [id (range 9000 11000)]
-      (-> (d/datoms @*db100k :eavt id :full-name)
-        first
-        :v))))
-
-(defn bench-find-datom []
-  (bench/bench
-    (doseq [id (range 9000 11000)]
-      (-> (d/find-datom @*db100k :eavt id :full-name)
-        :v))))
+    (binding [bench/*batch* 1]
+      (bench/bench "init"
+        (d/init-db datoms)))))
 
 (defn bench-retract-5 []
-  (let [db   (d/db-with empty-db @bench/*people20k)
-        eids (->> (d/datoms db :aevt :name) (map :e) (shuffle))]
-    (bench/bench
-      (reduce (fn [db eid] (d/db-with db [[:db.fn/retractEntity eid]])) db eids))))
+  ;; includes rebuilding the store: a snapshot cannot be re-retracted once
+  ;; its store has moved on
+  (binding [bench/*batch* 1]
+    (bench/bench "retract-5"
+      (let [db   (d/db-with (d/empty-db schema) @bench/*people1k)
+            eids (->> (d/datoms db :aevt :name) (map :e) (shuffle))]
+        (reduce (fn [db eid] (d/db-with db [[:db.fn/retractEntity eid]])) db eids)))))
+
+;; reads
+
+(def *eids1k
+  (delay
+    (->> (d/datoms @*db20k :aevt :full-name)
+      (map :e)
+      (shuffle)
+      (take 1000)
+      (vec))))
+
+(defn bench-find-datoms []
+  (let [db   @*db20k
+        eids @*eids1k]
+    (bench/bench "find-datoms"
+      (doseq [id eids]
+        (-> (d/datoms db :eavt id :full-name)
+          first
+          :v)))))
+
+(defn bench-find-datom []
+  (let [db   @*db20k
+        eids @*eids1k]
+    (bench/bench "find-datom"
+      (doseq [id eids]
+        (-> (d/find-datom db :eavt id :full-name)
+          :v)))))
 
 (defn bench-q1 []
-  (bench/bench
+  (bench/bench "q1"
     (d/q '[:find ?e
            :where [?e :name "Ivan"]]
-      @*db100k)))
+      @*db20k)))
 
 (defn bench-q2 []
-  (bench/bench
+  (bench/bench "q2"
     (d/q '[:find ?e ?a
            :where [?e :name "Ivan"]
                   [?e :age ?a]]
-      @*db100k)))
+      @*db20k)))
 
 (defn bench-q3 []
-  (bench/bench
+  (bench/bench "q3"
     (d/q '[:find ?e ?a
            :where [?e :name "Ivan"]
                   [?e :age ?a]
                   [?e :sex :male]]
-      @*db100k)))
+      @*db20k)))
 
 (defn bench-q4 []
-  (bench/bench
+  (bench/bench "q4"
     (d/q '[:find ?e ?l ?a
            :where [?e :name "Ivan"]
                   [?e :last-name ?l]
                   [?e :age ?a]
                   [?e :sex :male]]
-      @*db100k)))
+      @*db20k)))
 
 (defn bench-q5-shortcircuit []
-  (bench/bench
+  (bench/bench "q5-shortcircuit"
     (d/q '[:find ?e ?n ?l ?a ?s ?al
            :in $ ?n ?a
            :where [?e :name ?n]
@@ -119,24 +154,26 @@
                   [?e :last-name ?l]
                   [?e :sex ?s]
                   [?e :alias ?al]]
-      @*db100k
+      @*db20k
       "Anastasia"
       35)))
 
 (defn bench-qpred1 []
-  (bench/bench
+  (bench/bench "qpred1"
     (d/q '[:find ?e ?s
            :where [?e :salary ?s]
                   [(> ?s 50000)]]
-      @*db100k)))
+      @*db20k)))
 
 (defn bench-qpred2 []
-  (bench/bench
+  (bench/bench "qpred2"
     (d/q '[:find ?e ?s
            :in   $ ?min_s
            :where [?e :salary ?s]
                   [(> ?s ?min_s)]]
-      @*db100k 50000)))
+      @*db20k 50000)))
+
+;; pull
 
 (def *pull-db
   (delay
@@ -147,28 +184,30 @@
             (assoc
               (select-keys entity [:name])
               :follows (mapv f (:follows entity))))]
-    (bench/bench
+    (bench/bench "pull-one-entities"
       (f (d/entity @*pull-db [:id 1])))))
 
 (defn bench-pull-one []
-  (bench/bench
-    (d/pull @*pull-db [:name {:follows '...}] 1)))
+  (bench/bench "pull-one"
+    (d/pull @*pull-db [:name {:follows '...}] [:id 1])))
 
 (defn bench-pull-many-entities []
   (let [f (fn f [entity]
             (assoc
               (select-keys entity [:db/id :last-name :alias :sex :age :salary])
               :follows (mapv f (:follows entity))))]
-    (bench/bench
+    (bench/bench "pull-many-entities"
       (f (d/entity @*pull-db [:id 1])))))
 
 (defn bench-pull-many []
-  (bench/bench
-    (d/pull @*pull-db [:db/id :last-name :alias :sex :age :salary {:follows '...}] 1)))
+  (bench/bench "pull-many"
+    (d/pull @*pull-db [:db/id :last-name :alias :sex :age :salary {:follows '...}] [:id 1])))
 
 (defn bench-pull-wildcard []
-  (bench/bench
-    (d/pull @*pull-db ['* {:follows '...}] 1)))
+  (bench/bench "pull-wildcard"
+    (d/pull @*pull-db ['* {:follows '...}] [:id 1])))
+
+;; rules
 
 (defn bench-rules [db]
   (d/q '[:find ?e ?e2
@@ -183,49 +222,31 @@
 
 (defn bench-rules-wide-3x3 []
   (let [db (wide-db 3 3)]
-    (bench/bench (bench-rules db))))
+    (bench/bench "rules-wide-3x3" (bench-rules db))))
 
 (defn bench-rules-wide-5x3 []
   (let [db (wide-db 5 3)]
-    (bench/bench (bench-rules db))))
+    (bench/bench "rules-wide-5x3" (bench-rules db))))
 
 (defn bench-rules-wide-7x3 []
   (let [db (wide-db 7 3)]
-    (bench/bench (bench-rules db))))
+    (bench/bench "rules-wide-7x3" (bench-rules db))))
 
 (defn bench-rules-wide-4x6 []
   (let [db (wide-db 4 6)]
-    (bench/bench (bench-rules db))))
+    (bench/bench "rules-wide-4x6" (bench-rules db))))
 
 (defn bench-rules-long-10x3 []
   (let [db (long-db 10 3)]
-    (bench/bench (bench-rules db))))
+    (bench/bench "rules-long-10x3" (bench-rules db))))
 
 (defn bench-rules-long-30x3 []
   (let [db (long-db 30 3)]
-    (bench/bench (bench-rules db))))
+    (bench/bench "rules-long-30x3" (bench-rules db))))
 
 (defn bench-rules-long-30x5 []
   (let [db (long-db 30 5)]
-    (bench/bench (bench-rules db))))
-
-(def *serialize-db 
-  (delay
-    (d/db-with empty-db
-      (take 300000 bench/people))))
-
-#?(:clj
-   (def mapper
-     (com.fasterxml.jackson.databind.ObjectMapper.)))
-
-(defn bench-freeze []
-  (bench/bench
-    (-> @*serialize-db (d/serializable) #?(:clj (jsonista/write-value-as-string mapper) :cljs js/JSON.stringify))))
-
-(defn bench-thaw []
-  (let [json (-> @*serialize-db (d/serializable) #?(:clj (jsonista/write-value-as-string mapper) :cljs js/JSON.stringify))]
-    (bench/bench
-      (-> json #?(:clj (jsonista/read-value mapper) :cljs js/JSON.parse) d/from-serializable))))
+    (bench/bench "rules-long-30x5" (bench-rules db))))
 
 (def benches
   {"add-1"              bench-add-1
@@ -253,18 +274,16 @@
    "rules-wide-4x6"     bench-rules-wide-4x6
    "rules-long-10x3"    bench-rules-long-10x3
    "rules-long-30x3"    bench-rules-long-30x3
-   "rules-long-30x5"    bench-rules-long-30x5
-   "freeze"             bench-freeze
-   "thaw"               bench-thaw})
+   "rules-long-30x5"    bench-rules-long-30x5})
 
 (defn ^:export -main
-  "clj -A:bench -M -m dbval.bench.datascript [--profile] (add-1 | add-5 | ...)*"
+  "./script/bench.sh [--profile] (add-1 | add-5 | ...)*"
   [& args]
   (let [args     (or args ())
         profile? (.contains ^java.util.List args "--profile")
         args     (remove #{"--profile"} args)
         names    (or (not-empty args) (sort (keys benches)))
-        _        (apply println #?(:clj "CLJ:" :cljs "CLJS:") names)
+        _        (apply println "Benchmarks:" names)
         longest  (last (sort-by count names))]
     (binding [bench/*profile* profile?]
       (doseq [name names
@@ -275,42 +294,6 @@
             (println
               (bench/right-pad name (count longest))
               " "
-              (bench/left-pad (bench/round mean-ms) 6) "ms/op"
+              (bench/left-pad (bench/round mean-ms) 8) "ms/op"
               " " (or file ""))))))
-    #?(:clj (shutdown-agents))))
-
-(comment
-  (require 'dbval.bench.datascript :reload-all)
-
-  (bench-add-1)
-  (bench-add-5)
-  (bench-add-all)
-  (bench-init)
-  (bench-retract-5)
-  (bench-q1)
-  (bench-q2)
-  (bench-q3)
-  (bench-q4)
-  (bench-q5-shortcircuit)
-  (bench-qpred1)
-  (bench-qpred2)
-  (bench-pull-one-entities)
-  (bench-pull-one)
-  (bench-pull-many-entities)
-  (bench-pull-many)
-  (bench-pull-all)
-  (binding [bench/*profile* true]
-    (bench-pull-one))
-  (binding [bench/*profile* true]
-    (bench-pull-many))
-  (binding [bench/*profile* true]
-    (bench-pull-all))
-  (bench-rules-wide-3x3)
-  (bench-rules-wide-5x3)
-  (bench-rules-wide-7x3)
-  (bench-rules-wide-4x6)
-  (bench-rules-long-10x3)
-  (bench-rules-long-30x3)
-  (bench-rules-long-30x5)
-  (bench-freeze)
-  (bench-thaw))
+    (shutdown-agents)))

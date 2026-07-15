@@ -31,6 +31,14 @@
       (is (pos? (compare (d/basis-tx db2) (d/basis-tx db1)))))))
 
 
+(deftest test-empty-vector-value
+  ;; regression: storing an empty vector NPEd in `tuple` — the & rest args
+  ;; are nil for zero components, but Tuple.addAll requires a List
+  (let [tx (d/with (d/empty-db) [{:db/id "e1" :path []}])
+        e1 (get (:tempids tx) "e1")
+        db (:db-after tx)]
+    (is (= [[]] (mapv :v (d/datoms db :eavt e1 :path))))))
+
 (deftest test-diff
   ;; clojure.data/diff is deliberately unsupported: dbval databases may not
   ;; fit into memory, and a diff would have to realize both sides entirely.

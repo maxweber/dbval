@@ -333,7 +333,9 @@
   [& components]
   (.addAll (com.apple.foundationdb.tuple.Tuple.)
            ^java.util.List
-           components))
+           ;; & rest args are nil when empty, but addAll requires a List;
+           ;; empty tuples occur when an empty vector is stored as a value
+           (or components ())))
 
 (defn serialize-tuple
   [x]

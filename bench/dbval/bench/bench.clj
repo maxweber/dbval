@@ -1,7 +1,6 @@
 (ns dbval.bench.bench
   (:require
-   #?(:clj [clj-async-profiler.core :as clj-async-profiler]))
-  #?(:cljs (:require-macros dbval.bench.bench)))
+   [clj-async-profiler.core :as clj-async-profiler]))
 
 ; Measure time
 
@@ -11,13 +10,11 @@
 (def ^:dynamic *batch*     10)
 (def ^:dynamic *profile*   false)
 
-#?(:cljs (defn ^number now [] (js/performance.now))
-   :clj  (defn now ^double [] (/ (System/nanoTime) 1000000.0)))
+(defn now ^double [] (/ (System/nanoTime) 1000000.0))
 
-#?(:clj
-   (defmacro dotime
-     "Runs form duration, returns average time (ms) per iteration"
-     [duration & body]
+(defmacro dotime
+  "Runs form duration, returns average time (ms) per iteration"
+  [duration & body]
      `(let [start-t# (now)
             end-t#   (+ ~duration start-t#)]
         (loop [iterations# *batch*]
@@ -25,17 +22,13 @@
           (let [now# (now)]
             (if (< now# end-t#)
               (recur (+ *batch* iterations#))
-              (double (/ (- now# start-t#) iterations#))))))))
-
-(defn- if-cljs [env then else]
-  (if (:ns env) then else))
+              (double (/ (- now# start-t#) iterations#)))))))
 
 (defn median [xs]
   (nth (sort xs) (quot (count xs) 2)))
 
 (defn to-fixed [n places]
-  #?(:cljs (.toFixed n places)
-     :clj  (String/format java.util.Locale/ROOT (str "%." places "f") (to-array [(double n)]))))
+  (String/format java.util.Locale/ROOT (str "%." places "f") (to-array [(double n)])))
 
 (defn round [n]
   (cond
@@ -53,30 +46,22 @@
     (str s (apply str (repeat (- l (count s)) " ")))
     s))
 
-#?(:clj
-   (defmacro bench
-     "Runs for *wramup-ms* + *bench-ms*, returns median time (ms) per iteration"
-     [title & body]
-     (let [[title body] (if (string? title)
-                         [title body]
-                         ["unknown-bench" (cons title body)])]
-       (if-cljs &env
-         `(let [_#     (dotime *warmup-ms* ~@body)
-                times# (mapv
-                         (fn [_#]
-                           (dotime *bench-ms* ~@body))
-                         (range *samples*))]
-            {:mean-ms (median times#)})
-         `(let [_#      (dotime *warmup-ms* ~@body)
-                _#      (when *profile* (clj-async-profiler/start {}))
-                times#  (mapv
-                          (fn [_#]
-                            (dotime *bench-ms* ~@body))
-                          (range *samples*))
-                file#   (when *profile* (clj-async-profiler/stop {:title ~title}))]
-            (cond->
-              {:mean-ms (median times#)}
-              file# (assoc :file (.getAbsolutePath ^java.io.File file#))))))))
+(defmacro bench
+  "Runs for *warmup-ms* + *bench-ms*, returns median time (ms) per iteration"
+  [title & body]
+  (let [[title body] (if (string? title)
+                       [title body]
+                       ["unknown-bench" (cons title body)])]
+    `(let [_#      (dotime *warmup-ms* ~@body)
+           _#      (when *profile* (clj-async-profiler/start {}))
+           times#  (mapv
+                     (fn [_#]
+                       (dotime *bench-ms* ~@body))
+                     (range *samples*))
+           file#   (when *profile* (clj-async-profiler/stop {:title ~title}))]
+       (cond->
+         {:mean-ms (median times#)}
+         file# (assoc :file (.getAbsolutePath ^java.io.File file#))))))
 
 ;; test dbs
 
@@ -138,15 +123,23 @@
           y (range depth)
           :let [from (+ (* x (inc depth)) y)
                 to   (+ (* x (inc depth)) y 1)]]
-      [{:db/id   (inc from)
+      [{:db/id   (str (inc from))
         :name    "Ivan"
-        :follows (inc to)}
-       {:db/id   (inc to)
+        :follows (str (inc to))}
+       {:db/id   (str (inc to))
         :name    "Ivan"}])))
 
 (def people (repeatedly random-man))
 
+(def *people1k
+  "Dataset for transaction benchmarks: every iteration replays all
+   transactions against a fresh store, so the count stays small."
+  (delay
+    (shuffle
+      (take 1000 people))))
+
 (def *people20k
+  "Dataset for query benchmarks: the db is built once and only read."
   (delay
     (shuffle
       (take 20000 people))))
