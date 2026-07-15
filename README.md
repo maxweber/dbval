@@ -42,8 +42,10 @@ set and Datascript's core is a
 
 The storage layer is pluggable via the `dbval.store` protocol: a store only
 has to provide ordered range scans over committed keys and atomic batch
-commits. `dbval.store.sqlite` is the default backend and
-`dbval.store.memory` provides an in-memory store for tests. Note that dbval
+commits. `dbval.store.sqlite` is the default backend,
+`dbval.store.memory` provides an in-memory store for tests, and the
+[store-slatedb](store-slatedb/) module provides a
+[SlateDB](https://slatedb.io) backend on object storage. Note that dbval
 ships no storage driver — to use the default SQLite store, add
 `org.xerial/sqlite-jdbc` to your dependencies (like with
 [next.jdbc](https://github.com/seancorfield/next-jdbc), you bring the driver
