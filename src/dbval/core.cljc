@@ -425,11 +425,11 @@
   conn/conn-from-datoms)
 
 (def ^{:arglists '([] [schema] [schema opts])} create-conn
-  "Creates a mutable reference (a “connection”) to an empty immutable database.
+  "Creates a “connection” to an empty database.
 
-   Connections are lightweight in-memory structures (~atoms) with direct support of transaction listeners ([[listen!]], [[unlisten!]]) and other handy Dbval APIs ([[transact!]], [[reset-conn!]], [[db]]).
+   A connection is a lightweight handle to the underlying storage — not a state container. It supports transaction listeners ([[listen!]], [[unlisten!]]) and [[transact!]].
 
-   To access underlying immutable DB value, deref: `@conn`.
+   To access the current immutable DB value, deref: `@conn`. The value is derived from the storage on every deref, so it also reflects transactions that did not go through this connection's [[transact!]] (e.g. [[db-with]] on a db value backed by the same storage connection).
    
    For list of options, see [[empty-db]].
    
@@ -437,8 +437,8 @@
   conn/create-conn)
 
 (def ^{:arglists '([conn tx-data] [conn tx-data tx-meta])} transact!
-  "Applies transaction the underlying database value and atomically updates connection reference to point to the result of that transaction, new db value.
-  
+  "Applies transaction to the connection's underlying storage and commits it. The new db value is visible via `@conn` afterwards.
+
    Returns transaction report, a map:
 
        {:db-before ...      ; db value before transaction
@@ -447,7 +447,7 @@
         :tempids   {...}    ; map of tempid from tx-data => assigned entid in db-after
         :tx-meta   tx-meta} ; the exact value you passed as `tx-meta`
 
-  Note! `conn` will be updated in-place and is not returned from [[transact!]].
+  Note! [[transact!]] returns the transaction report, not the new db value — deref `conn` for that.
   
   Usage:
 

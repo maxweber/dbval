@@ -124,7 +124,7 @@
   (let [entities (entities->clj entities)
         report   (-> (conn/-transact! conn entities tx-meta)
                    tx-report->js)]
-    (doseq [[_ callback] (:listeners @(:atom conn))]
+    (doseq [[_ callback] (conn/listeners conn)]
       (callback report))
     report))
 
@@ -136,8 +136,8 @@
                                    (map #(assoc % :added false) (d/datoms @conn :eavt))
                                    (d/datoms db :eavt)))
                     :tx_meta   tx-meta}]
-    (reset! conn db)
-    (doseq [[_ callback] (:listeners @(:atom conn))]
+    (conn/reset-conn! conn db)
+    (doseq [[_ callback] (conn/listeners conn)]
       (callback report))
     db))
 
