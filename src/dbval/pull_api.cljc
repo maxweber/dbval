@@ -4,8 +4,7 @@
     [dbval.pull-parser :as dpp]
     [dbval.db :as db #?@(:cljs [:refer [DB]])]
     [dbval.lru :as lru]
-    [dbval.util :as util]
-    [me.tonsky.persistent-sorted-set :as set])
+    [dbval.util :as util])
   #?(:clj
      (:import
        [clojure.lang ISeq]

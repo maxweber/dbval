@@ -32,7 +32,6 @@
     dbval.test.query-pull
     dbval.test.query-return-map
     dbval.test.query-rules
-    dbval.test.query-v3
     dbval.test.transact
     dbval.test.tuples
     dbval.test.validation
