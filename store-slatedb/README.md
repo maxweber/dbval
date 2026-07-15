@@ -23,6 +23,11 @@ Depend on this module (e.g. via a git dependency with `:deps/root
 
 `:object-store-url` accepts `"file:///"`, `"memory:///"`, or an `s3://` URL.
 
+## Requirements
+
+`slatedb-uniffi` is compiled for class-file version 66, so this module
+requires **JDK 22 or newer** (dbval itself runs on JDK 11+).
+
 ## Tests
 
 ```bash

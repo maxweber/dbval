@@ -26,5 +26,10 @@ jobs:
           cli: latest
           lein: latest
       - run: ./script/test_clj.sh
+      - name: Choose Java 24 for store-slatedb (slatedb-uniffi targets class-file 66 / JDK 22+)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '24'
       - run: clojure -M:test
         working-directory: store-slatedb
