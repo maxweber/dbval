@@ -1,6 +1,5 @@
 {:deps
  {org.foundationdb/fdb-java {:mvn/version "7.3.47"}
-  org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
   com.yetanalytics/colossal-squuid {:mvn/version "0.1.5"
                                     :exclusions
                                     [ ;; important to avoid `java.lang.NoSuchMethodError: 'boolean com.google.protobuf.GeneratedMessageV3.isStringEmpty(java.lang.Object)'         at com.google.cloud.secretmanager.v1.ListSecretsRequest.getSerializedSize(ListSecretsRequest.java:355)`
@@ -30,7 +29,8 @@
    :jvm-opts    ["-ea" "-Ddbval.debug" "-Dclojure.main.report=stderr" "-Djdk.attach.allowAttachSelf"]
    :extra-deps
    {io.github.tonsky/duti      {:git/sha "e36d65296a4f9758664309ec35b00887e88c405a"}
-    com.cognitect/transit-clj  {:mvn/version "1.0.324"}}}
+    com.cognitect/transit-clj  {:mvn/version "1.0.324"}
+    org.xerial/sqlite-jdbc     {:mvn/version "3.47.1.0"}}}
 
   :bench
   {:extra-paths ["bench"]
@@ -39,4 +39,5 @@
               "-Djdk.attach.allowAttachSelf"
               "-XX:+DebugNonSafepoints"]
    :extra-deps
-   {io.github.tonsky/duti {:git/sha "e36d65296a4f9758664309ec35b00887e88c405a"}}}}}
+   {io.github.tonsky/duti {:git/sha "e36d65296a4f9758664309ec35b00887e88c405a"}
+    org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}}}}}

@@ -159,8 +159,11 @@
 
    Options are:
 
-   :db-file <string>  Path to the SQLite file backing this database.
-                      Defaults to a fresh temporary file."
+   :store   <dbval.store/ITupleStore>  The tuple store backing this database.
+                      Defaults to a SQLite store (see dbval.store.sqlite);
+                      dbval.store.memory provides an in-memory store.
+   :db-file <string>  Path to the SQLite file backing this database, when no
+                      :store is given. Defaults to a fresh temporary file."
   ([]
    (db/empty-db nil {}))
   ([schema]

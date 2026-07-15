@@ -65,6 +65,17 @@
     (is (thrown-msg? "underlying tuple store has already been modified"
           (d/db-with db1 [{:name "Oleg"}])))))
 
+(deftest test-deref-sees-other-connections
+  ;; two connections to the same SQLite file: reads run with autocommit, so
+  ;; a deref always sees the latest committed transaction instead of a
+  ;; pinned WAL read snapshot
+  (let [db-file (str (System/getProperty "java.io.tmpdir")
+                  "/dbval-test-" (random-uuid) ".db")
+        conn1   (d/create-conn nil {:db-file db-file})
+        conn2   (d/create-conn nil {:db-file db-file})]
+    (d/transact! conn1 [{:name "Ivan"}])
+    (is (= ["Ivan"] (mapv :v (d/datoms @conn2 :aevt :name))))))
+
 (deftest test-transact!-not-repeated-by-concurrent-conn-update
      ;; regression: `-transact!` used to run the (side-effecting, committing)
      ;; transaction inside `swap!`; a concurrent update of the conn state

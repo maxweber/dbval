@@ -22,6 +22,7 @@
     dbval.test.parser-where
     dbval.test.pull-api
     dbval.test.pull-parser
+    dbval.test.store
     dbval.test.query
     dbval.test.query-aggregates
     dbval.test.query-find-specs
