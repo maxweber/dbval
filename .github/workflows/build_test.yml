@@ -7,6 +7,7 @@ on:
     paths:
       - 'src/**'
       - 'test/**'
+      - 'store-slatedb/**'
       - 'project.clj'
       - 'deps.edn'
 
@@ -25,3 +26,5 @@ jobs:
           cli: latest
           lein: latest
       - run: ./script/test_clj.sh
+      - run: clojure -M:test
+        working-directory: store-slatedb

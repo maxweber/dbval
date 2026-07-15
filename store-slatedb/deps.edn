@@ -1,0 +1,12 @@
+{:paths ["src"]
+
+ :deps
+ {dbval/dbval {:local/root ".."}
+  io.slatedb/slatedb-uniffi {:mvn/version "0.14.1"}}
+
+ :aliases
+ {:test
+  {:extra-paths ["test"]
+   :jvm-opts    ["--enable-native-access=ALL-UNNAMED"]
+   :main-opts   ["-e"
+                 "(require 'dbval.store.slatedb-test) (let [r (clojure.test/run-tests 'dbval.store.slatedb-test)] (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))"]}}}
