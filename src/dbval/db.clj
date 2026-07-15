@@ -3,10 +3,10 @@
 
     [clojure.data]
     [clojure.edn :as edn]
-    [clojure.string :as str]
-    [clojure.java.io :as io]
     [dbval.inline :refer [update]]
     [dbval.lru :as lru]
+    [dbval.store :as store]
+    [dbval.store.sqlite :as sqlite-store]
     [dbval.util :as util]
     [dbval.arrays :as arrays]
     [com.yetanalytics.squuid :as squuid])
@@ -271,7 +271,7 @@
 
 ;; ----------------------------------------------------------------------------
 
-(declare db-conn)
+(declare db-store db-pending)
 
 (declare indexing?)
 
@@ -479,17 +479,6 @@
    (map (bytes-to-datoms-xf db))
    byte-tuples))
 
-(defn byte-array-compare
-  [^bytes a ^bytes b]
-  (java.util.Arrays/compareUnsigned
-   a
-   b))
-
-(def byte-array-comparator
-  (reify java.util.Comparator
-    (compare [_ a b]
-      (byte-array-compare ^bytes a ^bytes b))))
-
 (defn pack
   [^com.apple.foundationdb.tuple.Tuple tuple]
   (try
@@ -632,90 +621,50 @@
           :aevt)
         :eavt))))
 
-(defn- sqlite-jdbc-url
-  "Builds a full SQLite JDBC URL with optional pragmas."
-  [db-file {:keys [busy-timeout-ms foreign-keys? wal? read-only? mmap-size sync]
-            :or   {busy-timeout-ms 5000
-                   foreign-keys?   true
-                   wal?            true
-                   read-only?      false
-                   sync            "NORMAL"}}]
-  (let [params (cond-> {"busy_timeout" busy-timeout-ms
-                        "foreign_keys" (if foreign-keys? "on" "off")
-                        "synchronous"  (str sync)}
-                 wal?       (assoc "journal_mode" "WAL")
-                 read-only? (assoc "mode" "ro")
-                 mmap-size  (assoc "mmap_size" mmap-size))
-        qs     (->> params
-                    (map (fn [[k v]] (str k "=" v)))
-                    (str/join "&"))]
-    (str "jdbc:sqlite:" db-file (when (seq qs) (str "?" qs)))))
-
-(defn ^java.sql.Connection get-sqlite-connection
-  "Returns a java.sql.Connection for the given SQLite file.
-   Caller must close the connection manually."
-  [{:keys [db-file opts]}]
-  ;; explicitly load the driver class
-  (java.lang.Class/forName "org.sqlite.JDBC")
-  (let [^String url (sqlite-jdbc-url db-file opts)
-        conn (java.sql.DriverManager/getConnection url)]
-    (.setAutoCommit conn false)
-    conn))
+(defn- merge-sorted
+  "Lazily merges two seqs that are sorted by `cmp`, dropping duplicates."
+  [cmp xs ys]
+  (lazy-seq
+    (let [xs (seq xs)
+          ys (seq ys)]
+      (cond
+        (nil? xs) ys
+        (nil? ys) xs
+        :else
+        (let [x (first xs)
+              y (first ys)
+              c (cmp x y)]
+          (cond
+            (neg? c) (cons x (merge-sorted cmp (rest xs) ys))
+            (pos? c) (cons y (merge-sorted cmp xs (rest ys)))
+            :else    (cons x (merge-sorted cmp (rest xs) (rest ys)))))))))
 
 (defn slice
+  "Scans the db's store for keys in [begin, end), in unsigned byte order
+   (descending when `reverse`). When the db value carries a pending
+   transaction overlay, its keys are merged into the scan, so reads during
+   a transaction see the transaction's own uncommitted writes."
   [{:keys [db ^bytes begin ^bytes end reverse]}]
-  (reify java.lang.Iterable
-    (iterator [_]
-      (let [^java.sql.Connection conn (db-conn db)
-            ^java.sql.PreparedStatement stmt
-            (.prepareStatement conn
-                               (str "select k from dbval where k >= ? and k < ?"
-                                    (when reverse
-                                      " order by k desc"))
-                               java.sql.ResultSet/TYPE_FORWARD_ONLY
-                               java.sql.ResultSet/CONCUR_READ_ONLY)
-            _ (.setBytes stmt 1 begin)
-            _ (.setBytes stmt 2 end)
-            _ (.setFetchSize ^java.sql.Statement stmt 1000) ; hint (SQLite may ignore)
-            ^java.sql.ResultSet rs (.executeQuery stmt)
-
-            next-val (atom nil)
-            advanced (atom false)
-            closed   (atom false)
-            close!   (fn []
-                       (when-not @closed
-                         (reset! closed true)
-                         (try (.close rs)   (catch Throwable _))
-                         (try (.close stmt) (catch Throwable _))
-                         ))
-            advance! (fn []
-                       (when-not @closed
-                         (if (.next rs)
-                           (do (reset! next-val (.getBytes rs "k")) true)
-                           (do (reset! next-val nil) (close!) false))))]
-
-        (reify java.util.Iterator
-          (hasNext [this]
-            (or @advanced
-                (reset! advanced
-                        (boolean (advance!)))))
-          (next [_]
-            (let [ok (or @advanced (advance!))]
-              (when-not ok
-                (throw (java.util.NoSuchElementException.)))
-              (let [v @next-val]
-                (reset! advanced false)
-                (reset! next-val nil)
-                v)))
-          (remove [_]
-            (throw (UnsupportedOperationException. "remove not supported"))))))))
+  (let [scan (store/scan (db-store db) begin end (boolean reverse))]
+    (if-some [^java.util.NavigableSet pending (db-pending db)]
+      (let [sub     (.subSet pending begin true end false)
+            overlay (if reverse
+                      (.descendingSet ^java.util.NavigableSet sub)
+                      sub)
+            cmp     (if reverse
+                      (fn [a b] (store/byte-array-compare b a))
+                      (fn [a b] (store/byte-array-compare a b)))]
+        (merge-sorted cmp
+                      (iterator-seq (.iterator ^java.lang.Iterable scan))
+                      (seq overlay)))
+      scan)))
 
 ;; An opaque handle to a database value, like Datomic's Db: it hashes and
 ;; compares by reference identity. To compare two snapshots, compare
 ;; `basis-tx` (and know which store they came from) — content-based value
 ;; semantics would have to realize a potentially larger-than-memory database.
 (deftype DB [schema max-tx rschema pull-patterns pull-attrs
-             db-file conn]
+             store pending]
 
 
   IDB
@@ -930,18 +879,32 @@
   [db]
   (.-max-tx (unfiltered-db db)))
 
-(defn ^:no-doc ^java.sql.Connection db-conn
-     "The JDBC connection of the store backing this database value."
-     [db]
-     (.-conn (unfiltered-db db)))
+(defn ^:no-doc db-store
+  "The tuple store backing this database value (see `dbval.store`)."
+  [db]
+  (.-store (unfiltered-db db)))
+
+(defn- db-pending
+  "The pending transaction overlay of this db value: a NavigableSet of the
+   keys staged by the transaction that produced it, or nil outside of a
+   transaction."
+  [db]
+  (.-pending (unfiltered-db db)))
 
 (defn ^:no-doc ^DB with-max-tx
   "Copy of `db` with a different basis. Low-level; a db value normally gets
    its basis from the store (see `dbval.conn`) or a transaction."
   [^DB db max-tx]
   (DB. (.-schema db) max-tx (.-rschema db)
-              (.-pull-patterns db) (.-pull-attrs db)
-              (.-db-file db) (.-conn db)))
+       (.-pull-patterns db) (.-pull-attrs db)
+       (.-store db) (.-pending db)))
+
+(defn- ^DB with-pending
+  "Copy of `db` with a different pending overlay (nil to clear)."
+  [^DB db pending]
+  (DB. (.-schema db) (.-max-tx db) (.-rschema db)
+       (.-pull-patterns db) (.-pull-attrs db)
+       (.-store db) pending))
 
 ;; ----------------------------------------------------------------------------
 
@@ -1049,20 +1012,6 @@
             (when (= :db.cardinality/many (:db/cardinality (get schema attr)))
               (util/raise a " :db/tupleAttrs can't depend on :db.cardinality/many attribute: " attr ex-data))))))))
 
-(defn execute-sql!
-  "Executes a single SQL statement using the given java.sql.Connection.
-   Returns true if the statement returned a ResultSet, or false for an update/count.
-   Example:
-     (execute-sql! conn \"create table if not exists users (id integer primary key, name text)\")"
-  [^java.sql.Connection conn ^String sql]
-  (with-open [stmt (.createStatement conn)]
-    (.execute ^java.sql.Statement stmt sql)))
-
-(defn create-table!
-  [^java.sql.Connection conn]
-  ;; Create a table
-  (execute-sql! conn "create table if not exists dbval (k blob not null, primary key(k)) WITHOUT ROWID;"))
-
 (defn q-max-tx
   [db]
   (let [[begin end] (tuple-range "teav")
@@ -1079,22 +1028,16 @@
 (defn ^DB empty-db [schema opts]
   {:pre [(or (nil? schema) (map? schema))]}
   (validate-schema schema)
-  (let [db-file (or (:db-file opts)
-                    (.getCanonicalPath
-                     (java.io.File/createTempFile (str (random-uuid))
-                                                  ".db")))
-        _ (io/make-parents db-file)
-        ;; TODO: consider how to close the connection:
-        conn ^java.sql.Connection (get-sqlite-connection {:db-file db-file})
-        _ (create-table! conn)
-        _ (.commit conn)
-        db (DB. schema
-                tx0
-                (rschema (merge implicit-schema schema))
-                (lru/cache 100)
-                (lru/cache 100)
-                db-file
-                conn)]
+  ;; TODO: consider how to close the store:
+  (let [store (or (:store opts)
+                  (sqlite-store/store opts))
+        db    (DB. schema
+                   tx0
+                   (rschema (merge implicit-schema schema))
+                   (lru/cache 100)
+                   (lru/cache 100)
+                   store
+                   nil)]
     (with-max-tx db (q-max-tx db))))
 
 (defrecord TxReport [db-before db-after tx-data tempids tx-meta])
@@ -1132,12 +1075,12 @@
 (defn ^DB with-schema [^DB db schema]
   {:pre [(db? db) (or (nil? schema) (map? schema))]}
   (DB. schema
-                (.-max-tx db)
-                (rschema (merge implicit-schema schema))
-                (lru/cache 100)
-                (lru/cache 100)
-                (.-db-file db)
-                (.-conn db)))
+       (.-max-tx db)
+       (rschema (merge implicit-schema schema))
+       (lru/cache 100)
+       (lru/cache 100)
+       (.-store db)
+       (.-pending db)))
 
 
 (do
@@ -1686,12 +1629,9 @@
          false))
 
 (defn set-add!
-  [db stmt tuple]
+  [db ^java.util.NavigableSet pending tuple]
   (try
-    (.setBytes ^java.sql.PreparedStatement stmt
-               1
-               (pack tuple))
-    (.addBatch ^java.sql.PreparedStatement stmt)
+    (.add pending (pack tuple))
     (catch Exception e
       (throw (ex-info "set-add! failed"
                       {:tuple tuple}
@@ -1699,45 +1639,36 @@
   db)
 
 (defn all-tuples
-  "Returns a reducible of all tuples stored in the dbval table.
-   Each tuple is decoded from its byte representation.
-   Useful for debugging and inspecting the raw storage.
-   Example: (into [] (take 10) (all-tuples db))"
+  "Returns a reducible of all tuples in the db's store (committed, plus the
+   pending overlay if this db value carries one). Each tuple is decoded from
+   its byte representation. Useful for debugging and inspecting the raw
+   storage. Example: (into [] (take 10) (all-tuples db))"
   [db]
-  (reify clojure.lang.IReduceInit
-    (reduce [_ rf init]
-      (let [conn ^java.sql.Connection (db-conn db)]
-        (with-open [stmt (.prepareStatement conn "SELECT k FROM dbval ORDER BY k")
-                    rs (.executeQuery stmt)]
-          (loop [state init]
-            (if (or (reduced? state) (not (.next rs)))
-              (unreduced state)
-              (recur (rf state (vec (tuple-from-bytes (.getBytes rs "k"))))))))))))
+  (let [[begin end] (tuple-range)]
+    (eduction (map (comp vec tuple-from-bytes))
+              (slice {:db db :begin begin :end end}))))
 
 (defn with-datom [db ^Datom datom]
   (validate-datom db datom)
-  (let [conn ^java.sql.Connection (db-conn db)
-        stmt ^java.sql.PreparedStatement (.prepareStatement
-                                           conn
-                                           "INSERT OR IGNORE INTO dbval (k) VALUES (?)")
-        indexing? (indexing? db (.-a datom))
-        db (if (datom-added datom)
-             (-> db
-                 (set-add! stmt (datom-tuple db :eavt datom))
-                 (set-add! stmt (datom-tuple db :aevt datom))
-                 (cond-> indexing? (set-add! stmt (datom-tuple db :avet datom)))
-                 (set-add! stmt (datom-tuple db :teav datom)))
-             (if-some [removing (some-> (fsearch db [(.-e datom) (.-a datom) (.-v datom)])
-                                        (retract-datom (:tx datom)))]
-               (-> db
-                   (set-add! stmt (datom-tuple db :eavt removing))
-                   (set-add! stmt (datom-tuple db :aevt removing))
-                   (cond-> indexing? (set-add! stmt (datom-tuple db :avet removing)))
-                   (set-add! stmt (datom-tuple db :teav removing)))
-               db))]
-    (.executeBatch stmt)
-    (.close stmt)
-    db))
+  (let [^java.util.NavigableSet pending (db-pending db)
+        _ (when (nil? pending)
+            (util/raise "with-datom outside of a transaction"
+              {:error :transact/no-pending}))
+        indexing? (indexing? db (.-a datom))]
+    (if (datom-added datom)
+      (-> db
+          (set-add! pending (datom-tuple db :eavt datom))
+          (set-add! pending (datom-tuple db :aevt datom))
+          (cond-> indexing? (set-add! pending (datom-tuple db :avet datom)))
+          (set-add! pending (datom-tuple db :teav datom)))
+      (if-some [removing (some-> (fsearch db [(.-e datom) (.-a datom) (.-v datom)])
+                                 (retract-datom (:tx datom)))]
+        (-> db
+            (set-add! pending (datom-tuple db :eavt removing))
+            (set-add! pending (datom-tuple db :aevt removing))
+            (cond-> indexing? (set-add! pending (datom-tuple db :avet removing)))
+            (set-add! pending (datom-tuple db :teav removing)))
+        db))))
 
 (defn- queue-tuple [queue tuple idx db e a v]
   (let [tuple-attrs    (-> db (-schema) (get tuple) :db/tupleAttrs)
@@ -2227,53 +2158,30 @@
         (util/raise "Bad entity type at " entity ", expected map or vector"
           {:error :transact/syntax, :tx-data entity})))))
 
-(defmacro with-transaction
-  "Run BODY within a JDBC transaction on CONN.
-   - If CONN is already in a transaction (autocommit=false), just join it.
-   - If autocommit=true, disable it, start a transaction, and commit/rollback at the end."
-  [^java.sql.Connection conn & body]
-  `(let [was-auto?# (.getAutoCommit ~conn)]
-     (if-not was-auto?#
-       ;; Already inside a transaction — just run the body
-       (do ~@body)
-       ;; Start and manage a new transaction
-       (do
-         (.setAutoCommit ~conn false)
-         (try
-           (let [res# (do ~@body)]
-             (.commit ~conn)
-             res#)
-           (catch Throwable t#
-             (try (.rollback ~conn) (catch Throwable _#))
-             (throw t#))
-           (finally
-             (.setAutoCommit ~conn true)))))))
-
 (defn transact-tx-data [report es]
   (when-not (or
               (nil? es)
               (sequential? es))
     (util/raise "Bad transaction data " es ", expected sequential collection"
       {:error :transact/syntax, :tx-data es}))
-  (let [tx-id (squuid/generate-squuid)
+  (let [tx-id   (squuid/generate-squuid)
+        ;; The pending overlay collects this transaction's keys; reads during
+        ;; the transaction merge it over the store (see `slice`), so nothing
+        ;; touches the store until the final atomic commit — an exception
+        ;; while transacting simply discards the overlay.
+        pending (java.util.TreeSet. ^java.util.Comparator store/byte-array-comparator)
         report' (-> report
                     (assoc ::tx-id tx-id)
                     ;; Set max-tx to current tx-id so datoms added during this
                     ;; transaction are visible when searching for duplicates
-                    (update :db-after with-max-tx tx-id))
+                    (update :db-after with-max-tx tx-id)
+                    (update :db-after with-pending pending))
         {:keys [tx-data id-map]} (assign-entity-ids (:db-before report') es)
         ;; Pre-populate tempids with the tempid -> UUID mapping
         report'' (update report' :tempids merge id-map)
-        conn ^java.sql.Connection (db-conn (:db-after report''))]
-    (try
-      (let [result (with-transaction conn
-                     (transact-tx-data-impl report'' tx-data))]
-        (.commit conn)
+        result   (transact-tx-data-impl report'' tx-data)]
+    (store/commit! (db-store (:db-after result)) (seq pending))
+    (-> result
+        (update :db-after with-pending nil)
         ;; Add :tx field with the transaction UUID
-        (assoc result :tx tx-id))
-      (catch Throwable t
-        (try
-          (.rollback conn)
-          (.setAutoCommit conn false)
-          (catch Throwable _))
-        (throw t)))))
+        (assoc :tx tx-id))))
