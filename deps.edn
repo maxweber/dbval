@@ -9,12 +9,7 @@
   }
   
  :aliases
- {:cljs
-  {:extra-paths ["test"]
-   :extra-deps
-   {org.clojure/clojurescript {:mvn/version "1.11.132"}}}
-  
-  :1.9
+ {:1.9
   {:override-deps
    {org.clojure/clojure {:mvn/version "1.9.0"}}}
   
@@ -37,8 +32,7 @@
    {io.github.tonsky/duti      {:git/sha "e36d65296a4f9758664309ec35b00887e88c405a"}
     metosin/jsonista           {:mvn/version "0.3.3"}
     cheshire/cheshire          {:mvn/version "5.10.0"}
-    com.cognitect/transit-clj  {:mvn/version "1.0.324"}
-    com.cognitect/transit-cljs {:mvn/version "0.8.269"}}}
+    com.cognitect/transit-clj  {:mvn/version "1.0.324"}}}
 
   :bench
   {:extra-paths ["bench"]
