@@ -66,8 +66,8 @@
             [])))
 
     (testing "hash and equality"
-      ;; content-based hashing was removed together with `hash-db`: a
-      ;; filtered db is identified by the db it filters and its predicate
+      ;; content-based hashing was removed together with `hash-db`:
+      ;; db values (filtered or not) compare by reference identity
       (let [filtered (d/filter db remove-ivan)]
         (is (= filtered filtered))
         (is (= (hash filtered) (hash filtered)))

@@ -1,7 +1,6 @@
 (ns ^:no-doc dbval.db
   (:require
     #?(:cljs [goog.array :as garray])
-    [clojure.walk]
     [clojure.data]
     [clojure.edn :as edn]
     [clojure.string :as str]
@@ -14,7 +13,7 @@
     [taoensso.nippy :as nippy]
     [com.yetanalytics.squuid :as squuid])
   #?(:clj (:import clojure.lang.IFn$OOL))
-  #?(:cljs (:require-macros [dbval.db :refer [case-tree combine-cmp defn+ defcomp defrecord-updatable int-compare validate-attr validate-val]]))
+  #?(:cljs (:require-macros [dbval.db :refer [case-tree combine-cmp defn+ defcomp int-compare validate-attr validate-val]]))
   (:refer-clojure :exclude [seqable? #?(:clj update)]))
 
 #?(:clj (set! *warn-on-reflection* true))
@@ -60,10 +59,7 @@
                (instance? java.util.Map x)))))
 
 ;; ----------------------------------------------------------------------------
-;; macros and funcs to support writing defrecords and updating
-;; (replacing) builtins, i.e., Object/hashCode, IHashEq hasheq, etc.
-;; code taken from prismatic:
-;;  https://github.com/Prismatic/schema/commit/e31c419c56555c83ef9ee834801e13ef3c112597
+;; cross-platform macro helpers
 ;;
 
 (defn- cljs-env?
@@ -109,54 +105,6 @@
 (defn combine-hashes [x y]
   #?(:clj  (clojure.lang.Util/hashCombine x y)
      :cljs (hash-combine x y)))
-
-#?(:clj
-   (defn- get-sig [method]
-     ;; expects something like '(method-symbol [arg arg arg] ...)
-     ;; if the thing matches, returns [fully-qualified-symbol arity], otherwise nil
-     (and (sequential? method)
-       (symbol? (first method))
-       (vector? (second method))
-       (let [sym (first method)
-             ns  (or (some->> sym resolve meta :ns str) "clojure.core")]
-         [(symbol ns (name sym)) (-> method second count)]))))
-
-#?(:clj
-   (defn- dedupe-interfaces [deftype-form]
-     ;; get the interfaces list, remove any duplicates, similar to remove-nil-implements in potemkin
-     ;; verified w/ deftype impl in compiler:
-     ;; (deftype* tagname classname [fields] :implements [interfaces] :tag tagname methods*)
-     (let [[deftype* tagname classname fields implements interfaces & rest] deftype-form]
-       (when (or (not= deftype* 'deftype*) (not= implements :implements))
-         (throw (IllegalArgumentException. "deftype-form mismatch")))
-       (list* deftype* tagname classname fields implements (vec (distinct interfaces)) rest))))
-
-#?(:clj
-   (defn- make-record-updatable-clj [name fields & impls]
-     (let [impl-map (->> impls (map (juxt get-sig identity)) (filter first) (into {}))
-           body     (macroexpand-1 (list* 'defrecord name fields impls))]
-       (clojure.walk/postwalk
-         (fn [form]
-           (if (and (sequential? form) (= 'deftype* (first form)))
-             (->> form
-               dedupe-interfaces
-               (remove (fn [method]
-                         (when-some [impl (-> method get-sig impl-map)]
-                           (not= method impl)))))
-             form))
-         body))))
-
-#?(:clj
-   (defn- make-record-updatable-cljs [name fields & impls]
-     `(do
-        (defrecord ~name ~fields)
-        (extend-type ~name ~@impls))))
-
-#?(:clj
-   (defmacro defrecord-updatable [name fields & impls]
-     `(if-cljs
-        ~(apply make-record-updatable-cljs name fields impls)
-        ~(apply make-record-updatable-clj  name fields impls))))
 
 ;; ----------------------------------------------------------------------------
 
@@ -588,17 +536,7 @@
 
 ;; ----------------------------------------------------------------------------
 
-#?(:clj  (declare db-identity-hash)
-   :cljs (defn ^number db-identity-hash [db]))
-
-#?(:clj  (declare fdb-identity-hash)
-   :cljs (defn ^number fdb-identity-hash [db]))
-
-#?(:clj  (declare equiv-db)
-   :cljs (defn ^boolean equiv-db [db other]))
-
-#?(:clj  (declare restore-db)
-   :cljs (defn restore-db [keys]))
+#?(:clj (declare db-conn))
 
 #?(:clj  (declare indexing?)
    :cljs (defn ^boolean indexing? [db attr]))
@@ -662,18 +600,6 @@
   (-attrs-by [db property]))
 
 ;; ----------------------------------------------------------------------------
-
-(defn db-transient [db]
-  (-> db
-    (update :eavt transient)
-    (update :aevt transient)
-    (update :avet transient)))
-
-(defn db-persistent! [db]
-  (-> db
-    (update :eavt persistent!)
-    (update :aevt persistent!)
-    (update :avet persistent!)))
 
 #?(:clj
    (defn vpred [v]
@@ -788,7 +714,7 @@
     (edn/read-string v)
     (if (tuple? db attr)
       (deserialize-tuple v)
-      (if (get-in db [:schema attr :db/tupleAttrs])
+      (if (-> (-schema db) (get attr) :db/tupleAttrs)
         (deserialize-tuple v)
         v))))
 
@@ -1030,7 +956,7 @@
   [{:keys [db ^bytes begin ^bytes end reverse]}]
   (reify java.lang.Iterable
     (iterator [_]
-      (let [^java.sql.Connection conn (:conn db)
+      (let [^java.sql.Connection conn (db-conn db)
             ^java.sql.PreparedStatement stmt
             (.prepareStatement conn
                                (str "select k from dbval where k >= ? and k < ?"
@@ -1074,33 +1000,14 @@
           (remove [_]
             (throw (UnsupportedOperationException. "remove not supported"))))))))
 
-(defrecord-updatable DB [schema max-tx rschema pull-patterns pull-attrs
-                         #?@(:clj [db-file conn])]
+;; An opaque handle to a database value, like Datomic's Db: it hashes and
+;; compares by reference identity. To compare two snapshots, compare
+;; `basis-tx` (and know which store they came from) — content-based value
+;; semantics would have to realize a potentially larger-than-memory database.
+(deftype DB [schema max-tx rschema pull-patterns pull-attrs
+             #?@(:clj [db-file conn])]
   #?@(:cljs
-      [IHash                (-hash  [db]        (db-identity-hash db))
-       IEquiv               (-equiv [db other]  (equiv-db db other))
-       IReversible          (-rseq  [db]        (-rseq (.-eavt db)))
-       ICounted             (-count [db]        (count (.-eavt db)))
-       IEmptyableCollection (-empty [db]        (-> (restore-db
-                                                      {:schema  (.-schema db)
-                                                       :rschema (.-rschema db)
-                                                       :eavt    (empty (.-eavt db))
-                                                       :aevt    (empty (.-aevt db))
-                                                       :avet    (empty (.-avet db))})
-                                                  (with-meta (meta db))))
-       IPrintWithWriter     (-pr-writer [db w opts] (pr-db db w opts))
-       IEditableCollection  (-as-transient [db] (db-transient db))
-       ITransientCollection (-conj! [db key] (throw (ex-info "dbval.DB/conj! is not supported" {})))
-       (-persistent! [db] (db-persistent! db))]
-
-      :clj
-      [Object               (hashCode [db]      (db-identity-hash db))
-       clojure.lang.IHashEq (hasheq [db]        (db-identity-hash db))
-       clojure.lang.IEditableCollection
-       (asTransient [db] (db-transient db))
-       clojure.lang.ITransientCollection
-       (conj [db key] (throw (ex-info "dbval.DB/conj! is not supported" {})))
-       (persistent [db] (db-persistent! db))])
+      [IPrintWithWriter (-pr-writer [db w opts] (pr-db db w opts))])
 
   IDB
   (-schema [db] (.-schema db))
@@ -1130,7 +1037,7 @@
        (comp (map (bytes-to-datoms-xf db))
              (filter (fn [datom]
                        (uuid<= (:tx datom)
-                               (:max-tx db))))
+                               max-tx)))
              datoms-filter
              (filter (partial datom=
                               [e a v tx])))
@@ -1162,7 +1069,7 @@
        (comp (map (bytes-to-datoms-xf db))
                (filter (fn [datom]
                          (uuid<= (:tx datom)
-                                 (:max-tx db))))
+                                 max-tx)))
                datoms-filter
                (filter (partial datom=
                                 [e a v tx])))
@@ -1192,7 +1099,7 @@
        (comp (map (bytes-to-datoms-xf db))
              (filter (fn [datom]
                        (uuid<= (:tx datom)
-                               (:max-tx db))))
+                               max-tx)))
              datoms-filter)
        (slice {:db db
                :begin begin
@@ -1221,7 +1128,7 @@
        (comp (map (bytes-to-datoms-xf db))
              (filter (fn [datom]
                        (uuid<= (:tx datom)
-                               (:max-tx db))))
+                               max-tx)))
              datoms-filter-reverse)
        (slice {:db db
                :begin begin
@@ -1247,7 +1154,7 @@
        (comp (map (bytes-to-datoms-xf db))
              (filter (fn [datom]
                        (uuid<= (:tx datom)
-                               (:max-tx db))))
+                               max-tx)))
              datoms-filter)
        (slice {:db db
                :begin begin
@@ -1281,42 +1188,10 @@
        (satisfies? IDB x))))
 
 ;; ----------------------------------------------------------------------------
-(defrecord-updatable FilteredDB [unfiltered-db pred]
+;; Like DB, an opaque handle: reference identity only.
+(deftype FilteredDB [unfiltered-db pred]
   #?@(:cljs
-      [IHash                (-hash  [db]        (fdb-identity-hash db))
-       IEquiv               (-equiv [db other]  (equiv-db db other))
-       ICounted             (-count [db]        (count (-datoms db :eavt nil nil nil nil)))
-       IPrintWithWriter     (-pr-writer [db w opts] (pr-db db w opts))
-
-       IEmptyableCollection (-empty [_]         (throw (js/Error. "-empty is not supported on FilteredDB")))
-
-       ILookup              (-lookup ([_ _]     (throw (js/Error. "-lookup is not supported on FilteredDB")))
-                              ([_ _ _]   (throw (js/Error. "-lookup is not supported on FilteredDB"))))
-
-
-       IAssociative         (-contains-key? [_ _] (throw (js/Error. "-contains-key? is not supported on FilteredDB")))
-       (-assoc [_ _ _]       (throw (js/Error. "-assoc is not supported on FilteredDB")))]
-
-      :clj
-      [Object               (hashCode [db]      (fdb-identity-hash db))
-
-       clojure.lang.IHashEq (hasheq [db]        (fdb-identity-hash db))
-
-       clojure.lang.IPersistentCollection
-       (count [db]         (count (-datoms db :eavt nil nil nil nil)))
-       (equiv [db o]       (equiv-db db o))
-       (cons [db [k v]]    (throw (UnsupportedOperationException. "cons is not supported on FilteredDB")))
-       (empty [db]         (throw (UnsupportedOperationException. "empty is not supported on FilteredDB")))
-
-       clojure.lang.ILookup (valAt [db k]       (throw (UnsupportedOperationException. "valAt/2 is not supported on FilteredDB")))
-       (valAt [db k nf]    (throw (UnsupportedOperationException. "valAt/3 is not supported on FilteredDB")))
-       clojure.lang.IKeywordLookup (getLookupThunk [db k]
-                                     (throw (UnsupportedOperationException. "getLookupThunk is not supported on FilteredDB")))
-
-       clojure.lang.Associative
-       (containsKey [e k]  (throw (UnsupportedOperationException. "containsKey is not supported on FilteredDB")))
-       (entryAt [db k]     (throw (UnsupportedOperationException. "entryAt is not supported on FilteredDB")))
-       (assoc [db k v]     (throw (UnsupportedOperationException. "assoc is not supported on FilteredDB")))])
+      [IPrintWithWriter (-pr-writer [db w opts] (pr-db db w opts))])
 
   IDB
   (-schema [db]
@@ -1346,6 +1221,30 @@
   (if (instance? FilteredDB db)
     (.-unfiltered-db ^FilteredDB db)
     db))
+
+(defn basis-tx
+  "Returns the transaction id (the basis) up to which this database value
+   sees the store. Since db values are opaque handles that compare by
+   reference identity, comparing two snapshots of the same store means
+   comparing their `basis-tx`."
+  [db]
+  (.-max-tx (unfiltered-db db)))
+
+#?(:clj
+   (defn ^:no-doc ^java.sql.Connection db-conn
+     "The JDBC connection of the store backing this database value."
+     [db]
+     (.-conn (unfiltered-db db))))
+
+(defn ^:no-doc ^DB with-max-tx
+  "Copy of `db` with a different basis. Low-level; a db value normally gets
+   its basis from the store (see `dbval.conn`) or a transaction."
+  [^DB db max-tx]
+  #?(:clj  (DB. (.-schema db) max-tx (.-rschema db)
+              (.-pull-patterns db) (.-pull-attrs db)
+              (.-db-file db) (.-conn db))
+     :cljs (DB. (.-schema db) max-tx (.-rschema db)
+             (.-pull-patterns db) (.-pull-attrs db))))
 
 ;; ----------------------------------------------------------------------------
 
@@ -1492,17 +1391,14 @@
         conn ^java.sql.Connection (get-sqlite-connection {:db-file db-file})
         _ (create-table! conn)
         _ (.commit conn)
-        db (map->DB
-            {:schema        schema
-             :max-tx        tx0
-             :rschema       (rschema (merge implicit-schema schema))
-             :db-file       db-file
-             :conn          conn
-             :pull-patterns (lru/cache 100)
-             :pull-attrs    (lru/cache 100)})]
-    (assoc db
-           :max-tx
-           (q-max-tx db))))
+        db (DB. schema
+                tx0
+                (rschema (merge implicit-schema schema))
+                (lru/cache 100)
+                (lru/cache 100)
+                db-file
+                conn)]
+    (with-max-tx db (q-max-tx db))))
 
 (defrecord TxReport [db-before db-after tx-data tempids tx-meta])
 
@@ -1536,55 +1432,21 @@
     (db-transact db
                  (datoms->tx datoms))))
 
-(defn+ ^DB restore-db [{:keys [schema max-tx eavt aevt avet] :as keys}]
-  (map->DB
-    {:schema        schema
-     :max-tx        (or max-tx tx0)
-     :rschema       (or (:rschema keys)
-                      (rschema (merge implicit-schema schema)))
-     :eavt          eavt
-     :aevt          aevt
-     :avet          avet
-     :pull-patterns (lru/cache 100)
-     :pull-attrs    (lru/cache 100)}))
-
-(defn with-schema [db schema]
+(defn ^DB with-schema [^DB db schema]
   {:pre [(db? db) (or (nil? schema) (map? schema))]}
-  (assoc db
-    :schema        schema
-    :rschema       (rschema (merge implicit-schema schema))
-    :pull-patterns (lru/cache 100)
-    :pull-attrs    (lru/cache 100)))
+  #?(:clj  (DB. schema
+                (.-max-tx db)
+                (rschema (merge implicit-schema schema))
+                (lru/cache 100)
+                (lru/cache 100)
+                (.-db-file db)
+                (.-conn db))
+     :cljs (DB. schema
+                (.-max-tx db)
+                (rschema (merge implicit-schema schema))
+                (lru/cache 100)
+                (lru/cache 100))))
 
-;; A db value is identified by its storage, its basis (`:max-tx`) and its
-;; schema — not by its datoms. Content-based hashing and equality would have
-;; to realize a potentially larger-than-memory database (same reasoning as
-;; dropping `clojure.data/diff` support).
-
-(defn+ ^:private ^number db-identity-hash [^DB db]
-  (-> #?(:clj  (System/identityHashCode (.-conn db))
-         :cljs 0)
-    (combine-hashes (hash (.-max-tx db)))
-    (combine-hashes (hash (.-schema db)))))
-
-;; A filtered db is identified by the db it filters and its predicate.
-;; Predicates are compared by identity: there is no cheaper equality for
-;; functions.
-
-(defn+ ^:private ^number fdb-identity-hash [^FilteredDB db]
-  (-> (hash (.-unfiltered-db db))
-    (combine-hashes #?(:clj  (System/identityHashCode (.-pred db))
-                       :cljs (hash (.-pred db))))))
-
-(defn+ ^:private ^boolean equiv-db [db other]
-  (if (instance? FilteredDB db)
-    (and (instance? FilteredDB other)
-      (identical? (.-pred ^FilteredDB db) (.-pred ^FilteredDB other))
-      (equiv-db (.-unfiltered-db ^FilteredDB db) (.-unfiltered-db ^FilteredDB other)))
-    (and (instance? DB other)
-      #?@(:clj [(identical? (:conn db) (:conn other))])
-      (= (:max-tx db) (:max-tx other))
-      (= (:schema db) (:schema other)))))
 
 #?(:cljs
    (defn+ pr-db [db w opts]
@@ -1661,8 +1523,6 @@
   (first (-datoms db index c0 c1 c2 c3)))
 
 ;; ----------------------------------------------------------------------------
-
-(defrecord TxReport [db-before db-after tx-data tempids tx-meta])
 
 (defn+ ^boolean is-attr? [db attr property]
   (contains? (-attrs-by db property) attr))
@@ -1753,7 +1613,7 @@
     (some
       (fn [[tuple idx]]
         (when (is-attr? db tuple :db.unique/identity)
-          (let [tuple-attrs (get-in db [:schema tuple :db/tupleAttrs])
+          (let [tuple-attrs (-> (-schema db) (get tuple) :db/tupleAttrs)
                 allocated   (get tempids temp-e)
                 components  (map-indexed
                                (fn [i component]
@@ -2179,7 +2039,7 @@
   [db]
   (reify clojure.lang.IReduceInit
     (reduce [_ rf init]
-      (let [conn ^java.sql.Connection (:conn db)]
+      (let [conn ^java.sql.Connection (db-conn db)]
         (with-open [stmt (.prepareStatement conn "SELECT k FROM dbval ORDER BY k")
                     rs (.executeQuery stmt)]
           (loop [state init]
@@ -2189,7 +2049,7 @@
 
 (defn with-datom [db ^Datom datom]
   (validate-datom db datom)
-  (let [conn ^java.sql.Connection (:conn db)
+  (let [conn ^java.sql.Connection (db-conn db)
         stmt ^java.sql.PreparedStatement (.prepareStatement
                                            conn
                                            "INSERT OR IGNORE INTO dbval (k) VALUES (?)")
@@ -2430,25 +2290,6 @@
 #?(:clj  (declare transact-tx-data-impl)
    :cljs (defn transact-tx-data-impl [initial-report initial-es]))
 
-#?(:clj
-   (defn- rollback-report!
-     "Rolls the JDBC connection back to the transaction start before a retry.
-      Ensures tuple writes and schema mutations are cleared prior to re-running."
-     [report]
-     (when-let [conn (some-> report :db-after :conn)]
-       (try
-         (.rollback ^java.sql.Connection conn)
-         (.setAutoCommit ^java.sql.Connection conn false)
-         (catch Throwable t
-           (throw (ex-info "Failed to rollback transaction for retry"
-                           {:error :transact/retry}
-                           t))))))
-   :cljs
-   (defn ^:private rollback-report!
-     "No-op placeholder for CLJS where transactions are in-memory."
-     [report]
-     report))
-
 (def builtin-fn?
   #{:db.fn/call
     :db.fn/cas
@@ -2493,7 +2334,7 @@
       (util/cond+
         (empty? es)
         (-> report
-          (update :db-after assoc :max-tx (current-tx report))
+          (update :db-after with-max-tx (current-tx report))
           (update :tempids assoc :db/current-tx (current-tx report)))
 
         :let [[entity & entities] es]
@@ -2647,7 +2488,7 @@
               (not (::internal (meta entity)))
               (tuple? db a))
             ;; allow transacting in tuples if they fully match already existing values
-            (let [tuple-attrs   (get-in db [:schema a :db/tupleAttrs])
+            (let [tuple-attrs   (-> (-schema db) (get a) :db/tupleAttrs)
                   queued-value (get-in report [::queued-tuples e a])]
               (if queued-value
                 (if (and
@@ -2753,11 +2594,11 @@
                     (assoc ::tx-id tx-id)
                     ;; Set max-tx to current tx-id so datoms added during this
                     ;; transaction are visible when searching for duplicates
-                    (update :db-after assoc :max-tx tx-id))
+                    (update :db-after with-max-tx tx-id))
         {:keys [tx-data id-map]} (assign-entity-ids (:db-before report') es)
         ;; Pre-populate tempids with the tempid -> UUID mapping
         report'' (update report' :tempids merge id-map)
-        conn ^java.sql.Connection (:conn (:db-after report''))]
+        conn ^java.sql.Connection (db-conn (:db-after report''))]
     (try
       (let [result (with-transaction conn
                      (transact-tx-data-impl report'' tx-data))]

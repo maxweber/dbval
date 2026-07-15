@@ -208,6 +208,12 @@
        :doc "Returns a schema of a database."}
   schema db/-schema)
 
+(def ^{:arglists '([db])
+       :doc "Returns the transaction id (the basis) up to which this database value sees the store.
+
+             Database values are opaque handles that hash and compare by reference identity (like Datomic databases). To compare two snapshots of the same store, compare their `basis-tx`."}
+  basis-tx db/basis-tx)
+
 
 ; Filtered db
 

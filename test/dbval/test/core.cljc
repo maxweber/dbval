@@ -6,7 +6,7 @@
     [cognitect.transit :as transit]
     [dbval.core :as d]
     [dbval.impl.entity :as de]
-    [dbval.db :as db :refer [defrecord-updatable]]
+    [dbval.db :as db]
     #?(:cljs [dbval.test.cljs])))
 
 #?(:cljs
@@ -106,10 +106,8 @@
         db (:db-after tx)
         ivan-id (get (:tempids tx) "ivan")
         petr-id (get (:tempids tx) "petr")]
-    (is (= #{:schema :max-tx :rschema :pull-patterns :pull-attrs :db-file :conn}
-          (set (keys db))))
-    (is (map? db))
-    (is (seqable? (:eavt db)))
+    ;; db values are opaque handles (deftype), not maps
+    (is (not (map? db)))
     (is (= (set (d/datoms db :eavt))
           #{(d/datom ivan-id :aka "IV")
             (d/datom ivan-id :aka "Terrible")

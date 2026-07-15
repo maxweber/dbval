@@ -18,27 +18,27 @@
 (deftest test-ways-to-create-conn
   (let [conn (d/create-conn)]
     (is (= #{} (set (d/datoms @conn :eavt))))
-    (is (= nil (:schema @conn))))
+    (is (= nil (d/schema @conn))))
 
   (let [conn (d/create-conn schema)]
     (is (= #{} (set (d/datoms @conn :eavt))))
-    (is (= schema (:schema @conn))))
+    (is (= schema (d/schema @conn))))
 
   (let [conn (d/conn-from-datoms datoms)]
     (is (= datoms (set (d/datoms @conn :eavt))))
-    (is (= nil (:schema @conn))))
+    (is (= nil (d/schema @conn))))
 
   (let [conn (d/conn-from-datoms datoms schema)]
     (is (= datoms (set (d/datoms @conn :eavt))))
-    (is (= schema (:schema @conn))))
+    (is (= schema (d/schema @conn))))
 
   (let [conn (d/conn-from-db (d/init-db datoms))]
     (is (= datoms (set (d/datoms @conn :eavt))))
-    (is (= nil (:schema @conn))))
+    (is (= nil (d/schema @conn))))
 
   (let [conn (d/conn-from-db (d/init-db datoms schema))]
     (is (= datoms (set (d/datoms @conn :eavt))))
-    (is (= schema (:schema @conn)))))
+    (is (= schema (d/schema @conn)))))
 
 (deftest test-conn-is-not-an-atom
   ;; the store is the single source of truth; the conn is a handle, not a
@@ -81,4 +81,4 @@
        (d/reset-schema! conn {:y {:db/index true}})
        @transacting
        (is (= ["hello"] (mapv :v (d/datoms @conn :aevt :x))))
-       (is (= {:y {:db/index true}} (:schema @conn))))))
+       (is (= {:y {:db/index true}} (d/schema @conn))))))

@@ -12,9 +12,9 @@
    storage connection)."
   [{:keys [db]}]
   (let [max-tx (db/q-max-tx db)]
-    (if (= max-tx (:max-tx db))
+    (if (= max-tx (db/basis-tx db))
       db
-      (assoc db :max-tx max-tx))))
+      (db/with-max-tx db max-tx))))
 
 ;; A connection is not a state container: the store is the single source of
 ;; truth and `deref` derives the current database value from it. The `state`
@@ -58,7 +58,7 @@
   ([db tx-data tx-meta]
    {:pre [(db/db? db)]}
    (let [q-max-tx (db/q-max-tx db)
-         max-tx   (:max-tx db)]
+         max-tx   (db/basis-tx db)]
      ;; Check that the storage hasn't been modified since this db snapshot was created.
      ;; q-max-tx is the latest tx in storage, max-tx is what this snapshot sees.
      ;; If q-max-tx > max-tx, storage has been modified.

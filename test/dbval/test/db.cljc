@@ -3,42 +3,32 @@
     [clojure.data]
     [clojure.test :as t :refer [is are deftest testing]]
     [dbval.core :as d]
-    [dbval.db :as db :refer [defrecord-updatable]]
+    [dbval.db :as db]
     [dbval.test.core]))
 
-;;
-;; verify that defrecord-updatable works with compiler/core macro configuration
-;; define dummy class which redefines hash, could produce either
-;; compiler or runtime error
-;;
-(defrecord-updatable HashBeef [x]
-  #?@(:cljs [IHash                (-hash  [hb] 0xBEEF)]
-      :clj  [clojure.lang.IHashEq (hasheq [hb] 0xBEEF)]))
-
-(deftest test-defrecord-updatable
-  (is (= 0xBEEF (-> (map->HashBeef {:x :ignored}) hash))))
-
-
-;; regression for the removal of the content-based `hash-db`: a db value is
-;; identified by its storage, its basis (`:max-tx`) and its schema — hashing
-;; or comparing by content would have to realize a potentially
-;; larger-than-memory database
+;; regression for the removal of the content-based `hash-db`: db values are
+;; opaque handles (like Datomic databases) that hash and compare by reference
+;; identity — content-based value semantics would have to realize a
+;; potentially larger-than-memory database. Snapshots of the same store are
+;; compared via `basis-tx`.
 (deftest test-db-value-identity
   (let [conn (d/create-conn)
         db1  @conn
         db2  (d/db-with db1 [{:name "Ivan"}])]
-    (testing "same storage, same basis"
+    (testing "db values are not maps"
+      (is (not (map? db1)))
+      (is (nil? (:max-tx db1))))
+
+    (testing "reference identity"
       (is (= db1 db1))
-      (is (= db1 (assoc db1 :max-tx (:max-tx db1))))
-      (is (= (hash db1) (hash (assoc db1 :max-tx (:max-tx db1))))))
-
-    (testing "same storage, different basis"
       (is (not= db1 db2))
-      (is (not= (hash db1) (hash db2))))
+      ;; equal content is not enough: both databases are empty,
+      ;; but they are distinct handles (to distinct stores)
+      (is (not= @(d/create-conn) @(d/create-conn))))
 
-    (testing "different storage, equal content"
-      ;; both databases are empty, but live in different stores
-      (is (not= @(d/create-conn) @(d/create-conn))))))
+    (testing "snapshots are compared via basis-tx"
+      (is (= (d/basis-tx db1) (d/basis-tx db1)))
+      (is (pos? (compare (d/basis-tx db2) (d/basis-tx db1)))))))
 
 (defn- now []
   #?(:clj  (System/currentTimeMillis)

@@ -2,6 +2,7 @@
   (:require
     [clojure.test :as t :refer [is are deftest testing]]
     [dbval.core :as d]
+    [dbval.db :as db]
     [dbval.test.core :as tdc])
   #?(:clj
      (:import
@@ -14,14 +15,14 @@
               :session+student {:db/tupleAttrs [:session :student]
                                 :db/valueType :db.type/tuple}})]
     (is (= #{:year+session :semester+course+student :session+student}
-          (:db.type/tuple (:rschema db))))
+          (db/-attrs-by db :db.type/tuple)))
 
     (is (= {:year     {:year+session 0}
             :session  {:year+session 1, :session+student 0}
             :semester {:semester+course+student 0}
             :course   {:semester+course+student 1}
             :student  {:semester+course+student 2, :session+student 1}}
-          (:db/attrTuples (:rschema db))))
+          (db/-attrs-by db :db/attrTuples)))
 
     (is (thrown-msg? ":t2 :db/tupleAttrs can't depend on another tuple attribute: :t1"
           (d/empty-db {:t1 {:db/tupleAttrs [:a :b]}
