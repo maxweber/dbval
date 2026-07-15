@@ -1,8 +1,5 @@
 {:deps
- {persistent-sorted-set/persistent-sorted-set {:mvn/version "0.3.0"}
-  io.github.tonsky/extend-clj {:mvn/version "0.1.0"}
-  org.foundationdb/fdb-java {:mvn/version "7.3.47"}
-  com.taoensso/nippy {:mvn/version "3.6.0"}
+ {org.foundationdb/fdb-java {:mvn/version "7.3.47"}
   org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
   com.yetanalytics/colossal-squuid {:mvn/version "0.1.5"
                                     :exclusions
@@ -12,12 +9,7 @@
   }
   
  :aliases
- {:cljs
-  {:extra-paths ["test"]
-   :extra-deps
-   {org.clojure/clojurescript {:mvn/version "1.11.132"}}}
-  
-  :1.9
+ {:1.9
   {:override-deps
    {org.clojure/clojure {:mvn/version "1.9.0"}}}
   
@@ -38,10 +30,7 @@
    :jvm-opts    ["-ea" "-Ddbval.debug" "-Dclojure.main.report=stderr" "-Djdk.attach.allowAttachSelf"]
    :extra-deps
    {io.github.tonsky/duti      {:git/sha "e36d65296a4f9758664309ec35b00887e88c405a"}
-    metosin/jsonista           {:mvn/version "0.3.3"}
-    cheshire/cheshire          {:mvn/version "5.10.0"}
-    com.cognitect/transit-clj  {:mvn/version "1.0.324"}
-    com.cognitect/transit-cljs {:mvn/version "0.8.269"}}}
+    com.cognitect/transit-clj  {:mvn/version "1.0.324"}}}
 
   :bench
   {:extra-paths ["bench"]
@@ -50,10 +39,4 @@
               "-Djdk.attach.allowAttachSelf"
               "-XX:+DebugNonSafepoints"]
    :extra-deps
-   {metosin/jsonista {:mvn/version "0.3.3"}
-    io.github.tonsky/duti {:git/sha "e36d65296a4f9758664309ec35b00887e88c405a"}}}
-
-  :datomic
-  {:extra-paths ["bench_datomic" "test_datomic"]
-   :extra-deps
-   {com.datomic/peer {:mvn/version "1.0.6735"}}}}}
+   {io.github.tonsky/duti {:git/sha "e36d65296a4f9758664309ec35b00887e88c405a"}}}}}
