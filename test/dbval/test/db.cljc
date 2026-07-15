@@ -19,12 +19,26 @@
   (is (= 0xBEEF (-> (map->HashBeef {:x :ignored}) hash))))
 
 
-;; whitebox test to confirm that hash cache caches
-(deftest test-db-hash-cache
-  (let [db (d/empty-db)]
-    (is (= 0         @(.-hash db)))
-    (let [h (hash db)]
-      (is (= h @(.-hash db))))))
+;; regression for the removal of the content-based `hash-db`: a db value is
+;; identified by its storage, its basis (`:max-tx`) and its schema — hashing
+;; or comparing by content would have to realize a potentially
+;; larger-than-memory database
+(deftest test-db-value-identity
+  (let [conn (d/create-conn)
+        db1  @conn
+        db2  (d/db-with db1 [{:name "Ivan"}])]
+    (testing "same storage, same basis"
+      (is (= db1 db1))
+      (is (= db1 (assoc db1 :max-tx (:max-tx db1))))
+      (is (= (hash db1) (hash (assoc db1 :max-tx (:max-tx db1))))))
+
+    (testing "same storage, different basis"
+      (is (not= db1 db2))
+      (is (not= (hash db1) (hash db2))))
+
+    (testing "different storage, equal content"
+      ;; both databases are empty, but live in different stores
+      (is (not= @(d/create-conn) @(d/create-conn))))))
 
 (defn- now []
   #?(:clj  (System/currentTimeMillis)

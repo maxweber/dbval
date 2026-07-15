@@ -588,11 +588,11 @@
 
 ;; ----------------------------------------------------------------------------
 
-#?(:clj  (declare hash-db)
-   :cljs (defn ^number hash-db [db]))
+#?(:clj  (declare db-identity-hash)
+   :cljs (defn ^number db-identity-hash [db]))
 
-#?(:clj  (declare hash-fdb)
-   :cljs (defn ^number hash-fdb [db]))
+#?(:clj  (declare fdb-identity-hash)
+   :cljs (defn ^number fdb-identity-hash [db]))
 
 #?(:clj  (declare equiv-db)
    :cljs (defn ^boolean equiv-db [db other]))
@@ -1074,10 +1074,10 @@
           (remove [_]
             (throw (UnsupportedOperationException. "remove not supported"))))))))
 
-(defrecord-updatable DB [schema max-tx rschema pull-patterns pull-attrs hash
+(defrecord-updatable DB [schema max-tx rschema pull-patterns pull-attrs
                          #?@(:clj [db-file conn])]
   #?@(:cljs
-      [IHash                (-hash  [db]        (hash-db db))
+      [IHash                (-hash  [db]        (db-identity-hash db))
        IEquiv               (-equiv [db other]  (equiv-db db other))
        IReversible          (-rseq  [db]        (-rseq (.-eavt db)))
        ICounted             (-count [db]        (count (.-eavt db)))
@@ -1094,8 +1094,8 @@
        (-persistent! [db] (db-persistent! db))]
 
       :clj
-      [Object               (hashCode [db]      (hash-db db))
-       clojure.lang.IHashEq (hasheq [db]        (hash-db db))
+      [Object               (hashCode [db]      (db-identity-hash db))
+       clojure.lang.IHashEq (hasheq [db]        (db-identity-hash db))
        clojure.lang.IEditableCollection
        (asTransient [db] (db-transient db))
        clojure.lang.ITransientCollection
@@ -1258,7 +1258,7 @@
 
   ;; Implemented only to throw: without this extension `clojure.data/diff`
   ;; would fall back to its default map implementation and diff the DB
-  ;; record's fields (:conn, :max-tx, :hash, ...), silently producing
+  ;; record's fields (:conn, :max-tx, ...), silently producing
   ;; nonsense.
   clojure.data/Diff
   (diff-similar [a b]
@@ -1281,9 +1281,9 @@
        (satisfies? IDB x))))
 
 ;; ----------------------------------------------------------------------------
-(defrecord-updatable FilteredDB [unfiltered-db pred hash]
+(defrecord-updatable FilteredDB [unfiltered-db pred]
   #?@(:cljs
-      [IHash                (-hash  [db]        (hash-fdb db))
+      [IHash                (-hash  [db]        (fdb-identity-hash db))
        IEquiv               (-equiv [db other]  (equiv-db db other))
        ICounted             (-count [db]        (count (-datoms db :eavt nil nil nil nil)))
        IPrintWithWriter     (-pr-writer [db w opts] (pr-db db w opts))
@@ -1298,9 +1298,9 @@
        (-assoc [_ _ _]       (throw (js/Error. "-assoc is not supported on FilteredDB")))]
 
       :clj
-      [Object               (hashCode [db]      (hash-fdb db))
+      [Object               (hashCode [db]      (fdb-identity-hash db))
 
-       clojure.lang.IHashEq (hasheq [db]        (hash-fdb db))
+       clojure.lang.IHashEq (hasheq [db]        (fdb-identity-hash db))
 
        clojure.lang.IPersistentCollection
        (count [db]         (count (-datoms db :eavt nil nil nil nil)))
@@ -1499,8 +1499,7 @@
              :db-file       db-file
              :conn          conn
              :pull-patterns (lru/cache 100)
-             :pull-attrs    (lru/cache 100)
-             :hash          (atom 0)})]
+             :pull-attrs    (lru/cache 100)})]
     (assoc db
            :max-tx
            (q-max-tx db))))
@@ -1547,8 +1546,7 @@
      :aevt          aevt
      :avet          avet
      :pull-patterns (lru/cache 100)
-     :pull-attrs    (lru/cache 100)
-     :hash          (atom 0)}))
+     :pull-attrs    (lru/cache 100)}))
 
 (defn with-schema [db schema]
   {:pre [(db? db) (or (nil? schema) (map? schema))]}
@@ -1556,37 +1554,37 @@
     :schema        schema
     :rschema       (rschema (merge implicit-schema schema))
     :pull-patterns (lru/cache 100)
-    :pull-attrs    (lru/cache 100)
-    :hash          (atom 0)))
+    :pull-attrs    (lru/cache 100)))
 
-(defn- equiv-db-index [x y]
-  (loop [xs (seq x)
-         ys (seq y)]
-    (cond
-      (nil? xs) (nil? ys)
-      (= (first xs) (first ys)) (recur (next xs) (next ys))
-      :else false)))
+;; A db value is identified by its storage, its basis (`:max-tx`) and its
+;; schema — not by its datoms. Content-based hashing and equality would have
+;; to realize a potentially larger-than-memory database (same reasoning as
+;; dropping `clojure.data/diff` support).
 
-(defn+ ^:private ^number hash-db [^DB db]
-  (let [h @(.-hash db)]
-    (if (zero? h)
-      (reset! (.-hash db) (combine-hashes (hash (.-schema db))
-                            (hash-unordered-coll (-datoms db :eavt nil nil nil nil))))
-      h)))
+(defn+ ^:private ^number db-identity-hash [^DB db]
+  (-> #?(:clj  (System/identityHashCode (.-conn db))
+         :cljs 0)
+    (combine-hashes (hash (.-max-tx db)))
+    (combine-hashes (hash (.-schema db)))))
 
-(defn+ ^:private ^number hash-fdb [^FilteredDB db]
-  (let [h @(.-hash db)
-        datoms (or (-datoms db :eavt nil nil nil nil) #{})]
-    (if (zero? h)
-      (let [datoms (or (-datoms db :eavt nil nil nil nil) #{})]
-        (reset! (.-hash db) (combine-hashes (hash (-schema db))
-                              (hash-unordered-coll datoms))))
-      h)))
+;; A filtered db is identified by the db it filters and its predicate.
+;; Predicates are compared by identity: there is no cheaper equality for
+;; functions.
+
+(defn+ ^:private ^number fdb-identity-hash [^FilteredDB db]
+  (-> (hash (.-unfiltered-db db))
+    (combine-hashes #?(:clj  (System/identityHashCode (.-pred db))
+                       :cljs (hash (.-pred db))))))
 
 (defn+ ^:private ^boolean equiv-db [db other]
-  (and (or (instance? DB other) (instance? FilteredDB other))
-    (= (-schema db) (-schema other))
-    (equiv-db-index (-datoms db :eavt nil nil nil nil) (-datoms other :eavt nil nil nil nil))))
+  (if (instance? FilteredDB db)
+    (and (instance? FilteredDB other)
+      (identical? (.-pred ^FilteredDB db) (.-pred ^FilteredDB other))
+      (equiv-db (.-unfiltered-db ^FilteredDB db) (.-unfiltered-db ^FilteredDB other)))
+    (and (instance? DB other)
+      #?@(:clj [(identical? (:conn db) (:conn other))])
+      (= (:max-tx db) (:max-tx other))
+      (= (:schema db) (:schema other)))))
 
 #?(:cljs
    (defn+ pr-db [db w opts]
@@ -2201,16 +2199,14 @@
                  (set-add! stmt (datom-tuple db :eavt datom))
                  (set-add! stmt (datom-tuple db :aevt datom))
                  (cond-> indexing? (set-add! stmt (datom-tuple db :avet datom)))
-                 (set-add! stmt (datom-tuple db :teav datom))
-                 (assoc :hash (atom 0)))
+                 (set-add! stmt (datom-tuple db :teav datom)))
              (if-some [removing (some-> (fsearch db [(.-e datom) (.-a datom) (.-v datom)])
                                         (retract-datom (:tx datom)))]
                (-> db
                    (set-add! stmt (datom-tuple db :eavt removing))
                    (set-add! stmt (datom-tuple db :aevt removing))
                    (cond-> indexing? (set-add! stmt (datom-tuple db :avet removing)))
-                   (set-add! stmt (datom-tuple db :teav removing))
-                   (assoc :hash (atom 0)))
+                   (set-add! stmt (datom-tuple db :teav removing)))
                db))]
     (.executeBatch stmt)
     (.close stmt)

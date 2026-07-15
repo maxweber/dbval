@@ -65,12 +65,15 @@
       (is (= (map :v (d/datoms (d/filter db remove-pass) :aevt :password))
             [])))
 
-    (testing "hash"
-      (is (= (hash (d/db-with db [[:db.fn/retractEntity ivan]]))
-            (hash (d/filter db remove-ivan))))
-      (is (= (hash empty-db)
-            (hash (d/filter empty-db (constantly true)))
-            (hash (d/filter db (constantly false)))))))
+    (testing "hash and equality"
+      ;; content-based hashing was removed together with `hash-db`: a
+      ;; filtered db is identified by the db it filters and its predicate
+      (let [filtered (d/filter db remove-ivan)]
+        (is (= filtered filtered))
+        (is (= (hash filtered) (hash filtered)))
+        (is (not= filtered db))
+        ;; a fresh `filter` call creates a new predicate closure
+        (is (not= filtered (d/filter db remove-ivan))))))
 
   (testing "double filtering"
     (let [tx       (d/with (d/empty-db {:name {:db/unique :db.unique/identity}})

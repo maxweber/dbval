@@ -106,7 +106,7 @@
         db (:db-after tx)
         ivan-id (get (:tempids tx) "ivan")
         petr-id (get (:tempids tx) "petr")]
-    (is (= #{:schema :max-tx :rschema :pull-patterns :pull-attrs :hash :db-file :conn}
+    (is (= #{:schema :max-tx :rschema :pull-patterns :pull-attrs :db-file :conn}
           (set (keys db))))
     (is (map? db))
     (is (seqable? (:eavt db)))

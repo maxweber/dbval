@@ -14,10 +14,7 @@
   (let [max-tx (db/q-max-tx db)]
     (if (= max-tx (:max-tx db))
       db
-      (assoc db
-        :max-tx max-tx
-        ;; the set of visible datoms changed, drop the cached hash
-        :hash (atom 0)))))
+      (assoc db :max-tx max-tx))))
 
 ;; A connection is not a state container: the store is the single source of
 ;; truth and `deref` derives the current database value from it. The `state`

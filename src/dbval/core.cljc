@@ -231,8 +231,8 @@
     (let [^FilteredDB fdb db
           orig-pred (.-pred fdb)
           orig-db   (.-unfiltered-db fdb)]
-      (FilteredDB. orig-db #(and (orig-pred %) (pred orig-db %)) (atom 0)))
-    (FilteredDB. db #(pred db %) (atom 0))))
+      (FilteredDB. orig-db #(and (orig-pred %) (pred orig-db %))))
+    (FilteredDB. db #(pred db %))))
 
 
 ; Changing DB
