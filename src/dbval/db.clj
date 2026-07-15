@@ -331,11 +331,11 @@
 (defn ^com.apple.foundationdb.tuple.Tuple tuple
   "Turns the `components` into a `com.apple.foundationdb.tuple.Tuple`."
   [& components]
-  (.addAll (com.apple.foundationdb.tuple.Tuple.)
-           ^java.util.List
-           ;; & rest args are nil when empty, but addAll requires a List;
-           ;; empty tuples occur when an empty vector is stored as a value
-           (or components ())))
+  ;; & rest args are nil when empty, but addAll requires a List;
+  ;; empty tuples occur when an empty vector is stored as a value
+  (let [^java.util.List components (or components ())]
+    (.addAll (com.apple.foundationdb.tuple.Tuple.)
+             components)))
 
 (defn serialize-tuple
   [x]
