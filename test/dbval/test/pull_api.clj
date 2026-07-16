@@ -79,6 +79,33 @@
         (d/pull-many (test-db) '[:name] [[:name "Petr"] [:name "Elizabeth"]
                                          [:name "Eunan"] [:name "Rebecca"]]))))
 
+(deftest test-pull-namespaced-attrs-after-ref-attr
+  (let [db (:db-after
+             (d/with
+               (d/empty-db
+                 {:type {:db/valueType :db.type/ref}
+                  :instagram.story.image.preview/blob {:db/valueType :db.type/ref}})
+               [{:db/id "image-type"
+                 :db/ident :type.instagram.story/image}
+                {:db/id "preview-blob"
+                 :blob/id :preview}
+                {:db/id "story-media"
+                 :type "image-type"
+                 :story-media/name "image.jpg"
+                 :instagram.story.image.preview/blob "preview-blob"}]))
+        story-media-eid (ffirst (d/q '[:find ?e
+                                       :where
+                                       [?e :story-media/name]]
+                                     db))]
+    (is (= {:instagram.story.image.preview/blob {:blob/id :preview}
+            :story-media/name "image.jpg"
+            :type {:db/ident :type.instagram.story/image}}
+           (d/pull db
+                   '[:story-media/name
+                     {:type [:db/ident]}
+                     {:instagram.story.image.preview/blob [:blob/id]}]
+                   story-media-eid)))))
+
 (deftest test-pull-reverse-attr-spec
   (is (= {:name "David" :_child [{:db/id (eid "petr")}]}
         (d/pull (test-db) '[:name :_child] [:name "David"])))

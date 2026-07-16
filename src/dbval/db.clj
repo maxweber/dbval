@@ -368,19 +368,31 @@
     :else
     v))
 
+(defn attr-sort-key
+  "Returns the serialized key used for attribute components in indexes."
+  [attr]
+  (when attr
+    (pr-str attr)))
+
+(defn attr-compare
+  "Compares attributes in the same order as dbval indexes store them."
+  [a b]
+  (compare (attr-sort-key a)
+           (attr-sort-key b)))
+
 (defn tuple-list
   [db order datom]
   (try
     (let [[e a v t added] datom]
       (case (keyword order)
         :eavt
-        (list (name order) e (when a (pr-str a)) (serialize-value db a v) t added)
+        (list (name order) e (attr-sort-key a) (serialize-value db a v) t added)
         :aevt
-        (list (name order) (when a (pr-str a)) e (serialize-value db a v) t added)
+        (list (name order) (attr-sort-key a) e (serialize-value db a v) t added)
         :avet
-        (list (name order) (when a (pr-str a)) (serialize-value db a v) e t added)
+        (list (name order) (attr-sort-key a) (serialize-value db a v) e t added)
         :teav
-        (list (name order) t e (when a (pr-str a)) (serialize-value db a v) added)
+        (list (name order) t e (attr-sort-key a) (serialize-value db a v) added)
         ))
     (catch Exception e
       (throw (ex-info "tuple-list failed"

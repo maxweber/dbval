@@ -155,11 +155,9 @@
       (let [attrs       (.-attrs result)
             db-id?      (fn [^PullAttr attr] (#{:db/id ":db/id"} (.-name attr)))
             key-fn      (fn [^PullAttr attr]
-                          (let [name (:name attr)]
-                            (cond
-                              (keyword? name) name
-                              (= ":" (subs name 0 1)) (keyword (subs name 1))
-                              :eles (keyword name))))
+                          (if (db-id? attr)
+                            [1 nil]
+                            [0 (db/attr-sort-key (:name attr))]))
             attrs       (if (and
                               (.-wildcard? result)
                               (not (some db-id? (.-attrs result))))
