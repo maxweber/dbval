@@ -139,7 +139,8 @@
 
         :let [^Datom datom (first-seq datoms)
               cmp          (when (and datom attr)
-                             (compare (.-name attr) (.-a datom)))
+                             (db/compare-attr-keys (.-sort-key ^PullAttr attr)
+                                                   (db/attr-sort-key (.-a datom))))
               attr-ahead?  (or (nil? attr) (and cmp (pos? cmp)))
               datom-ahead? (or (nil? datom) (and cmp (neg? cmp)))]
 
@@ -280,25 +281,29 @@
                  (nil? (.-first-attr pattern))
                  nil
 
-                 :let [from (.-name ^PullAttr (.-first-attr pattern))
-                       to   (.-name ^PullAttr (.-last-attr pattern))]
+                 :let [from   (.-name ^PullAttr (.-first-attr pattern))
+                       to-key (.-sort-key ^PullAttr (.-last-attr pattern))]
 
                  (instance? DB db)
                  (take-while (fn [datom]
                                (and (= (:e datom)
                                        id)
-                                    (<= (compare (:a datom)
-                                                 to)
+                                    (<= (db/compare-attr-keys
+                                          (db/attr-sort-key (:a datom))
+                                          to-key)
                                         0)))
                              (db/-seek-datoms db :eavt id from nil nil))
 
                  :else
-                 (->> (db/-seek-datoms db :eavt id nil nil nil))
-                 (take-while
-                   (fn [^Datom d]
-                     (and
-                       (= (.-e d) id)
-                       (<= (compare (.-a d) to) 0)))))]
+                 (->> (db/-seek-datoms db :eavt id nil nil nil)
+                      (take-while
+                        (fn [^Datom d]
+                          (and
+                            (= (.-e d) id)
+                            (<= (db/compare-attr-keys
+                                  (db/attr-sort-key (.-a d))
+                                  to-key)
+                                0))))))]
     (when (.-wildcard? pattern)
       (visit context :db.pull/wildcard id nil nil))
     (AttrsFrame.

@@ -368,19 +368,54 @@
     :else
     v))
 
+(defn attr-sort-key
+  "Returns the serialized key used for attribute components in indexes."
+  [attr]
+  (when attr
+    (pr-str attr)))
+
+(defn compare-attr-keys
+  "Compares two serialized attribute keys (see `attr-sort-key`) in
+   code-point order — the order of their UTF-8 bytes, which is how the
+   store sorts serialized attribute components. Java's String compare
+   orders by UTF-16 code units instead, which disagrees for
+   supplementary-plane characters (e.g. emoji): surrogates sort below
+   U+E000..U+FFFF even though their code points are larger."
+  ^long [^String ka ^String kb]
+  (cond
+    (nil? ka) (if (nil? kb) 0 -1)
+    (nil? kb) 1
+    :else
+    (let [la (.length ka)
+          lb (.length kb)]
+      (loop [i (int 0)]
+        (if (and (< i la) (< i lb))
+          (let [ca (.codePointAt ka i)
+                cb (.codePointAt kb i)]
+            (if (= ca cb)
+              (recur (int (+ i (Character/charCount ca))))
+              (long (Integer/compare ca cb))))
+          (long (Integer/compare la lb)))))))
+
+(defn attr-compare
+  "Compares attributes in the same order as dbval indexes store them."
+  [a b]
+  (compare-attr-keys (attr-sort-key a)
+                     (attr-sort-key b)))
+
 (defn tuple-list
   [db order datom]
   (try
     (let [[e a v t added] datom]
       (case (keyword order)
         :eavt
-        (list (name order) e (when a (pr-str a)) (serialize-value db a v) t added)
+        (list (name order) e (attr-sort-key a) (serialize-value db a v) t added)
         :aevt
-        (list (name order) (when a (pr-str a)) e (serialize-value db a v) t added)
+        (list (name order) (attr-sort-key a) e (serialize-value db a v) t added)
         :avet
-        (list (name order) (when a (pr-str a)) (serialize-value db a v) e t added)
+        (list (name order) (attr-sort-key a) (serialize-value db a v) e t added)
         :teav
-        (list (name order) t e (when a (pr-str a)) (serialize-value db a v) added)
+        (list (name order) t e (attr-sort-key a) (serialize-value db a v) added)
         ))
     (catch Exception e
       (throw (ex-info "tuple-list failed"
