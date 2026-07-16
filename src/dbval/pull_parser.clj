@@ -1,15 +1,17 @@
 (ns ^:no-doc dbval.pull-parser
   (:require
+    [clojure.string :as str]
     [dbval.built-ins :as built-ins]
     [dbval.db :as db]
     [dbval.util :as util]))
 
-(defrecord PullAttr [as default limit name pattern recursion-limit recursive? reverse? xform multival? ref? component?])
+(defrecord PullAttr [as default limit name pattern recursion-limit recursive? reverse? xform multival? ref? component? sort-key])
 
 (defrecord PullPattern [attrs first-attr last-attr reverse-attrs wildcard?])
 
 (def default-db-id-attr
-  (map->PullAttr {:name :db/id :as :db/id :xform identity}))
+  (map->PullAttr {:name :db/id :as :db/id :xform identity
+                  :sort-key (db/attr-sort-key :db/id)}))
 
 (def default-pattern-ref
   (map->PullPattern {:attrs (list default-db-id-attr)}))
@@ -35,8 +37,20 @@
     (throw (ex-info (str "Expected " expected ", got: " (pr-str fragment))
              {:error :parser/pull, :fragment fragment}))))
 
+(defn- normalize-attr-spec
+  "A string attr spec starting with \":\" is the string spelling of a
+   keyword attribute (e.g. \":name\" or \":ns/_ref\") — normalize it to
+   the keyword, so it compares equal to the keyword attrs datoms carry.
+   Other strings name genuine string attributes and stay as-is."
+  [attr-spec]
+  (if (and (string? attr-spec)
+           (str/starts-with? attr-spec ":"))
+    (keyword (subs attr-spec 1))
+    attr-spec))
+
 (defn parse-attr-name [db attr-spec]
-  (let [reverse?   (db/reverse-ref? attr-spec)
+  (let [attr-spec  (normalize-attr-spec attr-spec)
+        reverse?   (db/reverse-ref? attr-spec)
         name       (if reverse? (db/reverse-ref attr-spec) attr-spec)
         ref?       (db/ref? db name)
         component? (db/component? db name)
@@ -44,6 +58,7 @@
     (map->PullAttr
       {:as         attr-spec
        :name       name
+       :sort-key   (db/attr-sort-key name)
        :xform      identity
        :multival?  (when multival? true)
        :limit      (if multival? 1000 nil)
@@ -153,17 +168,26 @@
     (util/cond+
       (empty? pattern)
       (let [attrs       (.-attrs result)
-            db-id?      (fn [^PullAttr attr] (#{:db/id ":db/id"} (.-name attr)))
+            db-id?      (fn [^PullAttr attr] (= :db/id (.-name attr)))
             key-fn      (fn [^PullAttr attr]
                           (if (db-id? attr)
                             [1 nil]
-                            [0 (db/attr-sort-key (:name attr))]))
+                            [0 (.-sort-key attr)]))
             attrs       (if (and
                               (.-wildcard? result)
                               (not (some db-id? (.-attrs result))))
                           (conj attrs default-db-id-attr)
                           attrs)
-            attrs       (list* (sort-by key-fn attrs))
+            ;; sort with the same code-point comparator the frame walk and
+            ;; the store use — default compare orders strings by UTF-16
+            ;; code units, which disagrees for supplementary-plane chars
+            attrs       (list* (sort-by key-fn
+                                        (fn [[group-a key-a] [group-b key-b]]
+                                          (let [c (compare group-a group-b)]
+                                            (if (zero? c)
+                                              (db/compare-attr-keys key-a key-b)
+                                              c)))
+                                        attrs))
             datom-attrs (remove db-id? attrs)
             first-attr  (first datom-attrs)
             last-attr   (last datom-attrs)]

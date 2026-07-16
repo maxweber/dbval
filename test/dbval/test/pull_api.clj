@@ -106,6 +106,45 @@
                      {:instagram.story.image.preview/blob [:blob/id]}]
                    story-media-eid)))))
 
+(deftest test-pull-filtered-db-is-bounded
+  ;; regression: the non-DB branch of attrs-frame had its take-while outside
+  ;; the ->>, returning an unbounded, entity-unguarded scan that leaked other
+  ;; entities' attribute values into the result
+  (let [e1 #uuid "11111111-1111-1111-1111-111111111111"
+        e2 #uuid "22222222-2222-2222-2222-222222222222"
+        db (:db-after
+             (d/with (d/empty-db)
+               [{:db/id e1 :name "First"}
+                {:db/id e2 :name "Second" :extra "must not leak"}]))
+        fdb (d/filter db (constantly true))]
+    (is (= {:name "First"}
+           (d/pull fdb [:name :extra] e1)))
+    (is (= {:name "Second" :extra "must not leak"}
+           (d/pull fdb [:name :extra] e2)))))
+
+(deftest test-pull-string-spelled-attrs
+  ;; regression: the string spelling of a keyword attribute (":name") was
+  ;; silently dropped after the parser stopped normalizing it
+  (is (= {:name "Petr"}
+         (d/pull (test-db) [":name"] [:name "Petr"])))
+  (let [result (d/pull (test-db) [":db/id" :name] [:name "Petr"])]
+    (is (= "Petr" (:name result)))
+    (is (uuid? (:db/id result)))))
+
+(deftest test-pull-supplementary-plane-attrs
+  ;; regression: attr-compare ordered attributes by UTF-16 code units while
+  ;; the store orders their serialized form by UTF-8 bytes (code points);
+  ;; the orders disagree for supplementary-plane characters, cutting the
+  ;; frame scan short
+  (let [attr-private (keyword "aa\ue000")   ;; U+E000: sorts high in UTF-16
+        attr-emoji   (keyword "aa\ud83d\ude00") ;; U+1F600: higher code point
+        db (:db-after
+             (d/with (d/empty-db)
+               [{:db/id "e" attr-private 1 attr-emoji 2}]))
+        eid (:e (first (d/datoms db :aevt attr-private)))]
+    (is (= {attr-private 1 attr-emoji 2}
+           (d/pull db [attr-private attr-emoji] eid)))))
+
 (deftest test-pull-reverse-attr-spec
   (is (= {:name "David" :_child [{:db/id (eid "petr")}]}
         (d/pull (test-db) '[:name :_child] [:name "David"])))

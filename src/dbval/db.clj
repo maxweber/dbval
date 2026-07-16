@@ -374,11 +374,34 @@
   (when attr
     (pr-str attr)))
 
+(defn compare-attr-keys
+  "Compares two serialized attribute keys (see `attr-sort-key`) in
+   code-point order — the order of their UTF-8 bytes, which is how the
+   store sorts serialized attribute components. Java's String compare
+   orders by UTF-16 code units instead, which disagrees for
+   supplementary-plane characters (e.g. emoji): surrogates sort below
+   U+E000..U+FFFF even though their code points are larger."
+  ^long [^String ka ^String kb]
+  (cond
+    (nil? ka) (if (nil? kb) 0 -1)
+    (nil? kb) 1
+    :else
+    (let [la (.length ka)
+          lb (.length kb)]
+      (loop [i (int 0)]
+        (if (and (< i la) (< i lb))
+          (let [ca (.codePointAt ka i)
+                cb (.codePointAt kb i)]
+            (if (= ca cb)
+              (recur (int (+ i (Character/charCount ca))))
+              (long (Integer/compare ca cb))))
+          (long (Integer/compare la lb)))))))
+
 (defn attr-compare
   "Compares attributes in the same order as dbval indexes store them."
   [a b]
-  (compare (attr-sort-key a)
-           (attr-sort-key b)))
+  (compare-attr-keys (attr-sort-key a)
+                     (attr-sort-key b)))
 
 (defn tuple-list
   [db order datom]

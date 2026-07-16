@@ -29,7 +29,8 @@
 (defn attr [name & {:as args}]
   (dpp/map->PullAttr
     (merge
-      {:name name :xform identity :as name}
+      {:name name :xform identity :as name
+       :sort-key (db/attr-sort-key name)}
       (when (db/ref? @*db name) {:pattern dpp/default-pattern-ref})
       args)))
 
