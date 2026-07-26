@@ -1,6 +1,8 @@
 (ns dbval.test.transact
   (:require
     [clojure.test :as t :refer [is are deftest testing]]
+    [com.yetanalytics.squuid :as squuid]
+    [com.yetanalytics.squuid.uuid :as squuid-uuid]
     [dbval.core :as d]
     [dbval.db :as db]
     [dbval.test.core :as tdc]))
@@ -465,6 +467,21 @@
     ;; With UUID-based tempids, all tempids are auto-resolved to UUIDs
     ;; and can be used as refs, so the "unused tempid" error no longer applies
     ))
+
+(deftest test-transaction-id-remains-monotonic-when-generator-goes-backwards
+  (let [conn (d/create-conn)
+        eid #uuid "11111111-1111-4111-8111-111111111111"
+        first-tx #uuid "02000000-0000-8000-8000-000000000000"
+        stale-generated-tx #uuid "01000000-0000-8000-8000-000000000000"
+        first-report (with-redefs [squuid/generate-squuid (constantly first-tx)]
+                       (d/transact! conn [{:db/id eid :value 1}]))
+        second-report (with-redefs [squuid/generate-squuid (constantly stale-generated-tx)]
+                        (d/transact! conn [[:db/add eid :value 2]]))
+        second-tx (squuid-uuid/inc-uuid first-tx)]
+    (is (= first-tx (d/basis-tx (:db-after first-report))))
+    (is (= second-tx (d/basis-tx (:db-after second-report))))
+    (is (= #{second-tx} (set (map :tx (:tx-data second-report)))))
+    (is (= 2 (:value (d/entity @conn eid))))))
 
 (deftest test-resolve-current-tx
   (doseq [tx-tempid [:db/current-tx "datomic.tx" "dbval.tx"]]

@@ -8,7 +8,8 @@
     [dbval.store :as store]
     [dbval.util :as util]
     [dbval.arrays :as arrays]
-    [com.yetanalytics.squuid :as squuid])
+    [com.yetanalytics.squuid :as squuid]
+    [com.yetanalytics.squuid.uuid :as squuid-uuid])
 
   (:refer-clojure :exclude [seqable? update]))
 
@@ -2304,6 +2305,14 @@
         (util/raise "Bad entity type at " entity ", expected map or vector"
           {:error :transact/syntax, :tx-data entity})))))
 
+(defn- next-tx-id
+  [db]
+  (let [current-basis (basis-tx db)
+        generated-tx (squuid/generate-squuid)]
+    (if (pos? (compare generated-tx current-basis))
+      generated-tx
+      (squuid-uuid/inc-uuid current-basis))))
+
 (defn transact-tx-data [report es]
   (when-not (or
               (nil? es)
@@ -2314,7 +2323,7 @@
     (util/raise "Cannot transact against an as-of/since/history database value"
       {:error :transact/temporal-view}))
   (let [dry-run? (::dry-run report)
-        tx-id   (squuid/generate-squuid)
+        tx-id   (next-tx-id (:db-after report))
         ;; The pending overlay collects this transaction's keys; reads during
         ;; the transaction merge it over the store (see `slice`), so nothing
         ;; touches the store until the final atomic commit — an exception
