@@ -380,11 +380,22 @@
         (and (instance? BlobRef other)
              (java.util.Arrays/equals hash ^bytes (.-hash ^BlobRef other))))))
 
+(defn- bytes->hex
+  ;; java.util.HexFormat needs JDK 17+, but dbval still supports JDK 11
+  ^String [^bytes bytes]
+  (let [sb (StringBuilder. (* 2 (alength bytes)))]
+    (dotimes [i (alength bytes)]
+      (let [b (bit-and (aget bytes i) 0xff)]
+        (when (< b 0x10)
+          (.append sb \0))
+        (.append sb (Integer/toHexString b))))
+    (str sb)))
+
 (defmethod print-method BlobRef [^BlobRef blob-ref ^java.io.Writer w]
   ;; prints the content hash, never the value: printing (logs, REPL) must not
   ;; fetch the blob
   (.write w "#dbval/blob-ref \"")
-  (.write w (.formatHex (java.util.HexFormat/of) (.-hash blob-ref)))
+  (.write w (bytes->hex (.-hash blob-ref)))
   (.write w "\""))
 
 (defn blob-ref? [x]
