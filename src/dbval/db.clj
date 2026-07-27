@@ -1468,6 +1468,13 @@
               (-> (-datoms db :avet a v nil nil) first :e)))
           entity)))
 
+(defn- new-eid
+  "Generates a new entity id. Uses sequential uuids (squuids) so that entity
+   ids sort by creation time, similar to Datomic's monotonically increasing
+   numeric eids. Applications rely on this for newest-first ordering by eid."
+  []
+  (squuid/generate-squuid))
+
 (defn- find-vector-upserts
   "For vector ops like [:db/add e a v], group by entity and check if their attrs
    match unique identity values that already exist. Returns {:tempid->upsert map, :identity-value->uuid map}.
@@ -1568,7 +1575,7 @@
                                   ;; Another tempid already claimed this value
                                   (swap! tempid->upsert assoc tempid existing-uuid)
                                   ;; First tempid with this value - generate UUID
-                                  (let [new-uuid (random-uuid)]
+                                  (let [new-uuid (new-eid)]
                                     (swap! tempid->upsert assoc tempid new-uuid)
                                     (swap! identity-value->uuid assoc key new-uuid))))))))
                       attrs)))))))
@@ -1607,7 +1614,7 @@
                                   ;; Another entity already claimed this value - map to it
                                   (swap! tempid->upsert assoc old-id existing-uuid)
                                   ;; First entity with this value - generate UUID and record it
-                                  (let [new-uuid (random-uuid)]
+                                  (let [new-uuid (new-eid)]
                                     (swap! tempid->upsert assoc old-id new-uuid)
                                     (swap! identity-value->uuid assoc key new-uuid))))))
                           entity))))))
@@ -1627,7 +1634,7 @@
                   ;; Otherwise use cached mapping or generate new UUID
                   (if-let [uuid (get @id-map id)]
                     uuid
-                    (let [uuid (random-uuid)]
+                    (let [uuid (new-eid)]
                       (swap! id-map assoc id uuid)
                       uuid)))
                 :else id))
@@ -1637,7 +1644,7 @@
                 (let [old-id (:db/id entity)
                       new-id (if (contains? entity :db/id)
                                (resolve-id old-id)
-                               (random-uuid))]
+                               (new-eid))]
                   (reduce-kv
                     (fn [entity a v]
                       (cond
@@ -1743,9 +1750,9 @@
   (::tx-id report))
 
 (defn- next-eid
-  "Generates a new random UUID for an entity."
+  "Generates a new sequential UUID (squuid) for an entity."
   [_db]
-  (random-uuid))
+  (new-eid))
 
 (defn- ^Boolean tx-id?
      [e]
