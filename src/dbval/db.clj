@@ -6,6 +6,7 @@
     [dbval.inline :refer [update]]
     [dbval.lru :as lru]
     [dbval.store :as store]
+    [dbval.tuple :as tuple-codec]
     [dbval.util :as util]
     [dbval.arrays :as arrays]
     [com.yetanalytics.squuid :as squuid]
@@ -413,14 +414,13 @@
 
 ;; ----------------------------------------------------------------------------
 
-(defn ^com.apple.foundationdb.tuple.Tuple tuple
-  "Turns the `components` into a `com.apple.foundationdb.tuple.Tuple`."
+(defn tuple
+  "Turns the `components` into a tuple (a vector) for the order-preserving
+   byte encoding in `dbval.tuple`."
   [& components]
-  ;; & rest args are nil when empty, but addAll requires a List;
-  ;; empty tuples occur when an empty vector is stored as a value
-  (let [^java.util.List components (or components ())]
-    (.addAll (com.apple.foundationdb.tuple.Tuple.)
-             components)))
+  ;; & rest args are nil when empty; empty tuples occur when an empty
+  ;; vector is stored as a value
+  (vec components))
 
 (defn serialize-tuple
   [x]
@@ -546,18 +546,14 @@
                         e))))))
 
 (defn tuple-range
-  "Turns the `components` into a `com.apple.foundationdb.tuple.Tuple` and returns
-   a vector of the begin and end of the tuple's range."
+  "Turns the `components` into a tuple and returns a vector of the begin
+   and end of the tuple's range."
   [& components]
-  (let [r (.range ^com.apple.foundationdb.tuple.Tuple
-                  (apply tuple
-                         components))]
-    [(.begin r)
-     (.end r)]))
+  (tuple-codec/range (vec components)))
 
-(defn ^com.apple.foundationdb.tuple.Tuple datom-tuple
-  "Converts a datom to a `com.apple.foundationdb.tuple.Tuple` and sorts the
-   components according to the `order`."
+(defn datom-tuple
+  "Converts a datom to a tuple and sorts the components according to the
+   `order`."
   ([db order datom]
    (apply tuple
           (tuple-list db
@@ -602,7 +598,7 @@
           v)))))
 
 (defn datom-from-tuple
-  "Reads back a datom that was stored as `com.apple.foundationdb.tuple.Tuple`."
+  "Reads back a datom that was stored as an encoded tuple."
   [db tuple]
   (try
     (let [[order c0 c1 c2 c3 c4] (vec tuple)]
@@ -625,9 +621,9 @@
                       e)))))
 
 (defn tuple-from-bytes
-  "Converts a byte array into a `com.apple.foundationdb.tuple.Tuple`."
+  "Converts a byte array back into a tuple (a vector of components)."
   [^bytes bytes]
-  (com.apple.foundationdb.tuple.Tuple/fromBytes bytes))
+  (tuple-codec/unpack bytes))
 
 (defn bytes-to-datoms-xf
   [db]
@@ -637,17 +633,16 @@
    tuple-from-bytes))
 
 (defn bytes-to-datoms
-  "Converts a collection of byte array (`com.apple.foundationdb.tuple.Tuple`) into
-   datoms."
+  "Converts a collection of byte arrays (encoded tuples) into datoms."
   [db byte-tuples]
   (->Eduction
    (map (bytes-to-datoms-xf db))
    byte-tuples))
 
 (defn pack
-  [^com.apple.foundationdb.tuple.Tuple tuple]
+  [tuple]
   (try
-    (.pack tuple)
+    (tuple-codec/pack tuple)
     (catch Exception e
       (throw (ex-info "pack failed"
                       {:tuple tuple}
