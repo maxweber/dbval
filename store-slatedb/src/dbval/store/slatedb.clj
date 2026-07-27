@@ -2,9 +2,13 @@
   "SlateDB-backed tuple store: an embedded ordered key-value store built on
    object storage (S3, GCS, or the local filesystem during development).
 
-   dbval only needs the key portion, so every key is stored with an empty
-   value. `-commit!` writes the batch through a SlateDB WriteBatch, which is
-   atomic; scans use SlateDB's native ascending/descending iteration.
+   Datom keys are stored with an empty value. Blobs of deref attributes are
+   stored under keys with the tuple prefix (\"blob\", <hash>) and carry the
+   value bytes in the SlateDB value (keys are capped at 64 KiB, values at
+   4 GiB). Datom scans are always prefixed with an index name (\"eavt\" etc.),
+   so the blob prefix never overlaps them. `-commit!` writes keys and blobs
+   through one SlateDB WriteBatch, which is atomic; scans use SlateDB's
+   native ascending/descending iteration.
 
    This namespace lives in the store-slatedb module because
    io.slatedb/slatedb-uniffi is a heavy native dependency and this namespace
@@ -22,6 +26,12 @@
 (def ^:private ^bytes EMPTY_VALUE
   "Empty byte array used as value for key-only puts in SlateDB."
   (byte-array 0))
+
+(defn- blob-key
+  "SlateDB key for the blob with the given content hash."
+  ^bytes [^bytes hash]
+  (.pack (com.apple.foundationdb.tuple.Tuple/from
+          (into-array Object ["blob" hash]))))
 
 (defonce ^:private native-lib-loaded
   ;; The slatedb-uniffi jar bundles the native library in JNA resource layout
@@ -89,11 +99,13 @@
       (iterator [_]
         (scan-iterator db begin end (boolean reverse?)))))
 
-  (-commit! [this keys]
-    (when (seq keys)
+  (-commit! [this keys blobs]
+    (when (or (seq keys) (seq blobs))
       (locking this
         (let [batch (WriteBatch.)]
           (try
+            (doseq [[^bytes h ^bytes v] blobs]
+              (.put batch (blob-key h) v))
             (doseq [^bytes k keys]
               (.put batch k EMPTY_VALUE))
             (await-future (.write db batch))
@@ -101,6 +113,9 @@
               ;; on success the batch contents were consumed by the write;
               ;; on error the batch is simply discarded
               (try (.close batch) (catch Throwable _))))))))
+
+  (-get-blob [_ hash]
+    (await-future (.get db (blob-key hash))))
 
   (-close! [_]
     (.close db)))

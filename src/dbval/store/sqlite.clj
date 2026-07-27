@@ -1,11 +1,14 @@
 (ns dbval.store.sqlite
-  "SQLite-backed tuple store: one table holding the sorted keys.
+  "SQLite-backed tuple store: one table holding the sorted keys and one
+   holding the content-addressed blobs of deref attributes.
 
        create table dbval (k blob not null, primary key(k)) WITHOUT ROWID;
+       create table dbval_blob (h blob not null, v blob not null,
+                                primary key(h)) WITHOUT ROWID;
 
    The JDBC connection runs with autocommit on, so every scan reads the
    latest committed state (no lingering WAL read transaction pinning an old
-   snapshot); `-commit!` wraps its batch insert in a single transaction."
+   snapshot); `-commit!` wraps its batch inserts in a single transaction."
   (:require
     [clojure.java.io :as io]
     [clojure.string :as str]
@@ -54,7 +57,9 @@
 (defn- create-table! [^java.sql.Connection conn]
   (with-open [stmt (.createStatement conn)]
     (.execute ^java.sql.Statement stmt
-      "create table if not exists dbval (k blob not null, primary key(k)) WITHOUT ROWID;")))
+      "create table if not exists dbval (k blob not null, primary key(k)) WITHOUT ROWID;")
+    (.execute ^java.sql.Statement stmt
+      "create table if not exists dbval_blob (h blob not null, v blob not null, primary key(h)) WITHOUT ROWID;")))
 
 (defn- scan-iterator
   ^java.util.Iterator [^java.sql.Connection conn ^bytes begin ^bytes end reverse?]
@@ -106,22 +111,37 @@
       (iterator [_]
         (scan-iterator conn begin end (boolean reverse?)))))
 
-  (-commit! [this keys]
-    (when (seq keys)
+  (-commit! [this keys blobs]
+    (when (or (seq keys) (seq blobs))
       (locking this
         (.setAutoCommit conn false)
         (try
-          (with-open [stmt (.prepareStatement conn "INSERT OR IGNORE INTO dbval (k) VALUES (?)")]
-            (doseq [^bytes k keys]
-              (.setBytes stmt 1 k)
-              (.addBatch stmt))
-            (.executeBatch stmt))
+          (when (seq blobs)
+            (with-open [stmt (.prepareStatement conn "INSERT OR IGNORE INTO dbval_blob (h, v) VALUES (?, ?)")]
+              (doseq [[^bytes h ^bytes v] blobs]
+                (.setBytes stmt 1 h)
+                (.setBytes stmt 2 v)
+                (.addBatch stmt))
+              (.executeBatch stmt)))
+          (when (seq keys)
+            (with-open [stmt (.prepareStatement conn "INSERT OR IGNORE INTO dbval (k) VALUES (?)")]
+              (doseq [^bytes k keys]
+                (.setBytes stmt 1 k)
+                (.addBatch stmt))
+              (.executeBatch stmt)))
           (.commit conn)
           (catch Throwable t
             (try (.rollback conn) (catch Throwable _))
             (throw t))
           (finally
             (.setAutoCommit conn true))))))
+
+  (-get-blob [_ hash]
+    (with-open [stmt (.prepareStatement conn "select v from dbval_blob where h = ?")]
+      (.setBytes stmt 1 ^bytes hash)
+      (with-open [rs (.executeQuery stmt)]
+        (when (.next rs)
+          (.getBytes rs "v")))))
 
   (-close! [_]
     (.close conn)))

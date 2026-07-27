@@ -9,9 +9,10 @@
   (:require
     [dbval.store :as store])
   (:import
-    [java.util.concurrent ConcurrentSkipListSet]))
+    [java.util.concurrent ConcurrentSkipListMap ConcurrentSkipListSet]))
 
-(deftype MemoryStore [^ConcurrentSkipListSet keyset]
+(deftype MemoryStore [^ConcurrentSkipListSet keyset
+                      ^ConcurrentSkipListMap blobs]
   store/ITupleStore
   (-scan [_ begin end reverse?]
     (let [sub (.subSet keyset begin true end false)]
@@ -19,18 +20,24 @@
         (.descendingSet ^java.util.NavigableSet sub)
         sub)))
 
-  (-commit! [this keys]
+  (-commit! [this keys new-blobs]
     ;; single writer at a time keeps the batch atomic with respect to other
     ;; commits; readers may observe a batch mid-insert, but the engine's
     ;; :max-tx filtering makes those keys invisible until the transaction's
     ;; basis is handed out
     (locking this
+      (doseq [[^bytes h ^bytes v] new-blobs]
+        (.putIfAbsent blobs h v))
       (doseq [^bytes k keys]
         (.add keyset k))))
+
+  (-get-blob [_ hash]
+    (.get blobs hash))
 
   (-close! [_] nil))
 
 (defn store
   "Creates an empty in-memory tuple store."
   ^dbval.store.memory.MemoryStore []
-  (MemoryStore. (ConcurrentSkipListSet. ^java.util.Comparator store/byte-array-comparator)))
+  (MemoryStore. (ConcurrentSkipListSet. ^java.util.Comparator store/byte-array-comparator)
+                (ConcurrentSkipListMap. ^java.util.Comparator store/byte-array-comparator)))

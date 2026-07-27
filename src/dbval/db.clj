@@ -328,6 +328,80 @@
 
 ;; ----------------------------------------------------------------------------
 
+;; Deref value types: attributes flagged with {:dbval/deref true} keep only a
+;; SHA-256 content hash of their value in the index keys; the value's pr-str
+;; bytes are stored once, content-addressed, in the store's blob area (see
+;; `dbval.store`). Reads return a `BlobRef` and the value is only fetched and
+;; parsed on `deref`. This keeps large values (which would otherwise blow up
+;; key sizes and scan costs) out of the indexes, while equality — datom
+;; equality, transact no-op detection, upserts and datalog joins — keeps
+;; working by comparing hashes: same content <=> same hash.
+
+(declare deref-attr? db-get-blob)
+
+(defn sha-256
+  "SHA-256 digest of `bytes`."
+  ^bytes [^bytes bytes]
+  (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes))
+
+(def ^:private blob-unrealized
+  "Sentinel marking a BlobRef whose value has not been parsed yet."
+  (Object.))
+
+;; `inline-str` is only set on refs deserialized from legacy inline datoms
+;; (written before their attribute was flagged as deref): such refs
+;; re-serialize to the original inline form, so retraction keys stay adjacent
+;; to the assertion keys they cancel out.
+(deftype BlobRef [db ^bytes hash ^bytes bytes inline-str
+                  ^:unsynchronized-mutable value]
+  clojure.lang.IDeref
+  (deref [this]
+    (locking this
+      (when (identical? blob-unrealized value)
+        (let [^bytes bs (or bytes (db-get-blob db hash))]
+          (when (nil? bs)
+            (util/raise "No blob found for deref value"
+              {:error :blob/not-found}))
+          (set! value (edn/read-string (String. bs java.nio.charset.StandardCharsets/UTF_8)))))
+      value))
+
+  clojure.lang.IPending
+  (isRealized [this]
+    (locking this
+      (not (identical? blob-unrealized value))))
+
+  clojure.lang.IHashEq
+  (hasheq [this] (java.util.Arrays/hashCode hash))
+
+  Object
+  (hashCode [this] (java.util.Arrays/hashCode hash))
+  (equals [this other]
+    (or (identical? this other)
+        (and (instance? BlobRef other)
+             (java.util.Arrays/equals hash ^bytes (.-hash ^BlobRef other))))))
+
+(defmethod print-method BlobRef [^BlobRef blob-ref ^java.io.Writer w]
+  ;; prints the content hash, never the value: printing (logs, REPL) must not
+  ;; fetch the blob
+  (.write w "#dbval/blob-ref \"")
+  (.write w (.formatHex (java.util.HexFormat/of) (.-hash blob-ref)))
+  (.write w "\""))
+
+(defn blob-ref? [x]
+  (instance? BlobRef x))
+
+(defn ^BlobRef value->blob-ref
+  "Wraps `v` — a value of a deref attribute — into a [[BlobRef]] carrying the
+   SHA-256 of its pr-str bytes. Passes an existing BlobRef through unchanged,
+   so values copied from query results are never re-serialized or fetched."
+  [db v]
+  (if (blob-ref? v)
+    v
+    (let [^bytes bs (.getBytes (pr-str v) java.nio.charset.StandardCharsets/UTF_8)]
+      (BlobRef. db (sha-256 bs) bs nil v))))
+
+;; ----------------------------------------------------------------------------
+
 (defn ^com.apple.foundationdb.tuple.Tuple tuple
   "Turns the `components` into a `com.apple.foundationdb.tuple.Tuple`."
   [& components]
@@ -353,15 +427,47 @@
     :else
     x))
 
+(def max-inline-value-bytes
+  "Maximum size of a serialized value inside an index key. Values are stored
+   in every index key of their datom, and SlateDB caps keys at 64 KiB, so
+   larger values must live in the blob area via a {:dbval/deref true}
+   attribute."
+  60000)
+
+(defn- validate-inline-size
+  ^String [attr ^String s]
+  ;; a String of n chars is at least n and at most 3n UTF-8 bytes (surrogate
+  ;; pairs of 4-byte code points are 2 chars); only compute the exact byte
+  ;; count when the cheap char-count bound cannot rule out an overflow
+  (when (and (> (* 3 (.length s)) max-inline-value-bytes)
+             (> (alength (.getBytes s java.nio.charset.StandardCharsets/UTF_8))
+                max-inline-value-bytes))
+    (util/raise "Value of attribute " attr " serializes to more than "
+                max-inline-value-bytes " bytes and cannot be stored inside "
+                "index keys. Flag the attribute with {:dbval/deref true} to "
+                "store its values in the blob area instead."
+      {:error :transact/value-too-large
+       :attribute attr
+       :length (.length s)}))
+  s)
+
 (defn serialize-value
   [db attr v]
   (cond
+    (blob-ref? v)
+    (or (.-inline-str ^BlobRef v)
+        (.-hash ^BlobRef v))
+
+    ;; nil marks an unbound search-pattern component and must stay nil
+    (and (some? v) (deref-attr? db attr))
+    (.-hash (value->blob-ref db v))
+
     (or (map? v)
         (keyword? v)
         (symbol? v)
         (string? v)
         (instance? java.util.Date v))
-    (pr-str v)
+    (validate-inline-size attr (pr-str v))
 
     (sequential? v)
     (serialize-tuple v)
@@ -419,10 +525,14 @@
         (list (name order) t e (attr-sort-key a) (serialize-value db a v) added)
         ))
     (catch Exception e
-      (throw (ex-info "tuple-list failed"
-                      {:order order
-                       :datom datom}
-                      e)))))
+      (if (= :transact/value-too-large (:error (ex-data e)))
+        ;; pass through unchanged: wrapping would put the oversized datom
+        ;; into ex-data and thereby into every log of the error
+        (throw e)
+        (throw (ex-info "tuple-list failed"
+                        {:order order
+                         :datom datom}
+                        e))))))
 
 (defn tuple-range
   "Turns the `components` into a `com.apple.foundationdb.tuple.Tuple` and returns
@@ -463,13 +573,22 @@
 
 (defn deserialize-value
   [db attr v]
-  (if (string? v)
-    (edn/read-string v)
-    (if (tuple? db attr)
-      (deserialize-tuple v)
-      (if (-> (-schema db) (get attr) :db/tupleAttrs)
+  (if (deref-attr? db attr)
+    (if (string? v)
+      ;; legacy datom written before `attr` was flagged as deref: the
+      ;; serialized value still lives inline in the index key. Hashing it
+      ;; here keeps equality consistent with blob-backed datoms of the same
+      ;; value, since both hash the same pr-str bytes.
+      (let [^bytes bs (.getBytes ^String v java.nio.charset.StandardCharsets/UTF_8)]
+        (BlobRef. db (sha-256 bs) bs v blob-unrealized))
+      (BlobRef. db v nil nil blob-unrealized))
+    (if (string? v)
+      (edn/read-string v)
+      (if (tuple? db attr)
         (deserialize-tuple v)
-        v))))
+        (if (-> (-schema db) (get attr) :db/tupleAttrs)
+          (deserialize-tuple v)
+          v)))))
 
 (defn datom-from-tuple
   "Reads back a datom that was stored as `com.apple.foundationdb.tuple.Tuple`."
@@ -747,7 +866,7 @@
 ;; `basis-tx` (and know which store they came from) — content-based value
 ;; semantics would have to realize a potentially larger-than-memory database.
 (deftype DB [schema max-tx rschema pull-patterns pull-attrs
-             store pending as-of-tx since-tx history?]
+             store pending pending-blobs as-of-tx since-tx history?]
 
 
   IDB
@@ -757,6 +876,9 @@
   ISearch
   (-search [db pattern]
     (let [[e a v tx] pattern
+          v (if (and (some? a) (some? v) (deref-attr? db a))
+              (value->blob-ref db v)
+              v)
           index (pattern->order db
                                 pattern)
           [begin end] (apply tuple-range
@@ -959,13 +1081,30 @@
   [db]
   (.-pending (unfiltered-db db)))
 
+(defn- db-pending-blobs
+  "The pending blob overlay of this db value: a Map of content hash bytes ->
+   value bytes staged by the transaction that produced it, or nil outside of
+   a transaction."
+  [db]
+  (.-pending-blobs (unfiltered-db db)))
+
+(defn ^:no-doc db-get-blob
+  "Returns the blob bytes stored under the content `hash` as visible to this
+   db value: the pending transaction overlay first, then the committed
+   store. Used by BlobRef deref, so a transaction function can deref a value
+   asserted earlier in the same transaction."
+  ^bytes [db ^bytes hash]
+  (or (when-some [^java.util.Map blobs (db-pending-blobs db)]
+        (.get blobs hash))
+      (store/get-blob (db-store db) hash)))
+
 (defn ^:no-doc ^DB with-max-tx
   "Copy of `db` with a different basis. Low-level; a db value normally gets
    its basis from the store (see `dbval.conn`) or a transaction."
   [^DB db max-tx]
   (DB. (.-schema db) max-tx (.-rschema db)
        (.-pull-patterns db) (.-pull-attrs db)
-       (.-store db) (.-pending db)
+       (.-store db) (.-pending db) (.-pending-blobs db)
        (.-as-of-tx db) (.-since-tx db) (.-history? db)))
 
 (declare with-pending)
@@ -990,7 +1129,7 @@
   (let [tx (coerce-tx t)]
     (DB. (.-schema db) tx (.-rschema db)
          (.-pull-patterns db) (.-pull-attrs db)
-         (.-store db) (.-pending db)
+         (.-store db) (.-pending db) (.-pending-blobs db)
          tx (.-since-tx db) (.-history? db))))
 
 (defn as-of-t
@@ -1006,7 +1145,7 @@
   {:pre [(instance? DB db)]}
   (DB. (.-schema db) (.-max-tx db) (.-rschema db)
        (.-pull-patterns db) (.-pull-attrs db)
-       (.-store db) (.-pending db)
+       (.-store db) (.-pending db) (.-pending-blobs db)
        (.-as-of-tx db) (coerce-tx t) (.-history? db)))
 
 (defn since-t
@@ -1023,7 +1162,7 @@
   {:pre [(instance? DB db)]}
   (DB. (.-schema db) (.-max-tx db) (.-rschema db)
        (.-pull-patterns db) (.-pull-attrs db)
-       (.-store db) (.-pending db)
+       (.-store db) (.-pending db) (.-pending-blobs db)
        (.-as-of-tx db) (.-since-tx db) true))
 
 (defn temporal-view?
@@ -1036,11 +1175,11 @@
                  (.-history? db)))))
 
 (defn- ^DB with-pending
-  "Copy of `db` with a different pending overlay (nil to clear)."
-  [^DB db pending]
+  "Copy of `db` with different pending key and blob overlays (nil to clear)."
+  [^DB db pending pending-blobs]
   (DB. (.-schema db) (.-max-tx db) (.-rschema db)
        (.-pull-patterns db) (.-pull-attrs db)
-       (.-store db) pending
+       (.-store db) pending pending-blobs
        (.-as-of-tx db) (.-since-tx db) (.-history? db)))
 
 ;; ----------------------------------------------------------------------------
@@ -1054,6 +1193,7 @@
     (cond
       (and (= :db/isComponent k) (true? v)) [:db/isComponent]
       (and (= :db/index k) (true? v))       [:db/index]
+      (and (= :dbval/deref k) (true? v))    [:dbval/deref]
       (= :db/tupleAttrs k)                  [:db.type/tuple :db/index]
       :else [])))
 
@@ -1118,6 +1258,15 @@
     (validate-schema-key a :db/valueType (:db/valueType kv) #{:db.type/ref :db.type/tuple})
     (validate-schema-key a :db/cardinality (:db/cardinality kv) #{:db.cardinality/one :db.cardinality/many})
 
+    ;; deref: value lives in the blob area, only its content hash is indexed
+    (validate-schema-key a :dbval/deref (:dbval/deref kv) #{true false})
+    (when (and (:dbval/deref kv)
+               (or (:db/valueType kv) (:db/tupleAttrs kv)))
+      (util/raise "Bad attribute specification for " a ": {:dbval/deref true} cannot be combined with :db/valueType or :db/tupleAttrs"
+        {:error     :schema/validation
+         :attribute a
+         :key       :dbval/deref}))
+
     ;; tuple should have tupleAttrs
     (when (and (= :db.type/tuple (:db/valueType kv))
             (not (contains? kv :db/tupleAttrs)))
@@ -1181,7 +1330,7 @@
                    (lru/cache 100)
                    (lru/cache 100)
                    store
-                   nil nil nil nil)]
+                   nil nil nil nil nil)]
     (with-max-tx db (q-max-tx db))))
 
 (defrecord TxReport [db-before db-after tx-data tempids tx-meta])
@@ -1225,6 +1374,7 @@
        (lru/cache 100)
        (.-store db)
        (.-pending db)
+       (.-pending-blobs db)
        (.-as-of-tx db)
        (.-since-tx db)
        (.-history? db)))
@@ -1252,15 +1402,24 @@
 
 (declare ref?)
 
+(defn resolve-pattern-v
+  "Resolves the value component of a search pattern: entity ids for ref
+   attributes, BlobRefs for deref attributes (so both the scan range and the
+   `datom=` post-filter compare content hashes)."
+  [db a v]
+  (cond
+    (not (some? v))    v
+    (ref? db a)        (entid-strict db v)
+    (deref-attr? db a) (value->blob-ref db v)
+    :else              v))
+
 (defn resolve-datom [db e a v t default-e default-tx]
   (when (some? a)
     (validate-attr a (list 'resolve-datom 'db e a v t)))
   (datom
     (if (some? e) (entid-strict db e) default-e)
     a
-    (if (and (some? v) (ref? db a))
-      (entid-strict db v)
-      v)
+    (resolve-pattern-v db a v)
     (if (some? t) (entid-strict db t) default-tx)))
 
 (defn components->pattern [db index c0 c1 c2 c3 default-e default-tx]
@@ -1274,9 +1433,7 @@
     (validate-attr a (list 'resolve-datom 'db e a v t)))
   [(when (some? e) (entid-strict db e))
    a
-   (if (and (some? v) (ref? db a))
-     (entid-strict db v)
-     v)
+   (resolve-pattern-v db a v)
    (when (some? t) (entid-strict db t))])
 
 (defn components->pattern* [db index c0 c1 c2 c3]
@@ -1315,6 +1472,12 @@
 
 (defn tuple? [db attr]
   (is-attr? db attr :db.type/tuple))
+
+(defn deref-attr?
+  "True if `attr` is flagged with {:dbval/deref true}: its values are stored
+   content-addressed in the blob area and surface as BlobRefs."
+  [db attr]
+  (is-attr? db attr :dbval/deref))
 
 (defn tuple-source? [db attr]
   (is-attr? db attr :db/attrTuples))
@@ -1795,6 +1958,37 @@
     (eduction (map (comp vec tuple-from-bytes))
               (slice {:db db :begin begin :end end}))))
 
+(defn- find-exact-datom
+  "Finds the current datom with exactly [e a v]. For deref attributes this
+   also finds legacy inline datoms (written before the attribute was flagged
+   as deref), which the hash-ranged search cannot see."
+  ^Datom [db e a v]
+  (or (fsearch db [e a v])
+      (when (deref-attr? db a)
+        (some (fn [^Datom d] (when (= (.-v d) v) d))
+              (-search db [e a])))))
+
+(defn- stage-blob!
+  "Stages the blob behind `blob-ref` into the transaction's pending blob
+   overlay, so it is committed atomically with its datom's keys."
+  [db ^BlobRef blob-ref]
+  (let [^java.util.Map blobs (db-pending-blobs db)
+        ^bytes hash (.-hash blob-ref)]
+    (when (nil? blobs)
+      (util/raise "stage-blob! outside of a transaction"
+        {:error :transact/no-pending}))
+    (when-not (.containsKey blobs hash)
+      (if-some [^bytes bs (.-bytes blob-ref)]
+        (.put blobs hash bs)
+        ;; a BlobRef without bytes came from a query, so its blob normally
+        ;; already lives in this store; fetch it from the ref's origin db
+        ;; only when it does not (a value copied from another database)
+        (when (nil? (store/get-blob (db-store db) hash))
+          (if-some [^bytes bs (db-get-blob (.-db blob-ref) hash)]
+            (.put blobs hash bs)
+            (util/raise "No blob found for deref value"
+              {:error :blob/not-found})))))))
+
 (defn with-datom [db ^Datom datom]
   (validate-datom db datom)
   (let [^java.util.NavigableSet pending (db-pending db)
@@ -1803,12 +1997,18 @@
               {:error :transact/no-pending}))
         indexing? (indexing? db (.-a datom))]
     (if (datom-added datom)
-      (-> db
-          (set-add! pending (datom-tuple db :eavt datom))
-          (set-add! pending (datom-tuple db :aevt datom))
-          (cond-> indexing? (set-add! pending (datom-tuple db :avet datom)))
-          (set-add! pending (datom-tuple db :teav datom)))
-      (if-some [removing (some-> (fsearch db [(.-e datom) (.-a datom) (.-v datom)])
+      (do
+        ;; legacy refs (inline-str) serialize back into the key itself and
+        ;; need no blob
+        (when (and (blob-ref? (.-v datom))
+                   (nil? (.-inline-str ^BlobRef (.-v datom))))
+          (stage-blob! db (.-v datom)))
+        (-> db
+            (set-add! pending (datom-tuple db :eavt datom))
+            (set-add! pending (datom-tuple db :aevt datom))
+            (cond-> indexing? (set-add! pending (datom-tuple db :avet datom)))
+            (set-add! pending (datom-tuple db :teav datom))))
+      (if-some [removing (some-> (find-exact-datom db (.-e datom) (.-a datom) (.-v datom))
                                  (retract-datom (:tx datom)))]
         (-> db
             (set-add! pending (datom-tuple db :eavt removing))
@@ -2005,11 +2205,14 @@
   (let [tx        (or tx (current-tx report))
         db        (:db-after report)
         e         (entid-strict db e)
-        v         (if (ref? db a) (entid-strict db v) v)
+        v         (cond
+                    (ref? db a)        (entid-strict db v)
+                    (deref-attr? db a) (value->blob-ref db v)
+                    :else              v)
         new-datom (datom e a v tx)
         multival? (multival? db a)
         old-datom ^Datom (if multival?
-                           (fsearch db [e a v])
+                           (find-exact-datom db e a v)
                            (fsearch db [e a]))]
     (cond
       (nil? old-datom)
@@ -2180,7 +2383,11 @@
             (let [[_ e a ov nv] entity
                   e      (entid-strict db e)
                   _      (validate-attr a entity)
-                  ov     (if (ref? db a) (entid-strict db ov) ov)
+                  ov     (cond
+                           (ref? db a)        (entid-strict db ov)
+                           (and (some? ov)
+                                (deref-attr? db a)) (value->blob-ref db ov)
+                           :else              ov)
                   nv     (if (ref? db a) (entid-strict db nv) nv)
                   _      (validate-val nv entity)
                   datoms (vec (-search db [e a]))]
@@ -2266,10 +2473,13 @@
 
             (and (= op :db/retract) (some? v))
             (if-some [e (entid db e)]
-              (let [v (if (ref? db a) (entid-strict db v) v)]
+              (let [v (cond
+                        (ref? db a)        (entid-strict db v)
+                        (deref-attr? db a) (value->blob-ref db v)
+                        :else              v)]
                 (validate-attr a entity)
                 (validate-val v entity)
-                (if-some [old-datom (fsearch db [e a v])]
+                (if-some [old-datom (find-exact-datom db e a v)]
                   (recur (transact-retract-datom report old-datom) entities)
                   (recur report entities)))
               (recur report entities))
@@ -2329,6 +2539,11 @@
         ;; touches the store until the final atomic commit — an exception
         ;; while transacting simply discards the overlay.
         pending (java.util.TreeSet. ^java.util.Comparator store/byte-array-comparator)
+        ;; The blobs of deref values staged by this transaction (content hash
+        ;; -> value bytes); committed atomically with the pending keys and
+        ;; overlaid over the store's blob reads in the meantime (see
+        ;; `db-get-blob`).
+        pending-blobs (java.util.TreeMap. ^java.util.Comparator store/byte-array-comparator)
         ;; Carry over speculative datoms when chaining a dry-run on a dry-run
         ;; db-after, so they stay visible in the new speculative view. A real
         ;; transact must not inherit them: they were never committed and would
@@ -2338,12 +2553,15 @@
               (.addAll ^java.util.TreeSet pending prev)
               (util/raise "Cannot transact against a speculative (dry-run) database value"
                 {:error :transact/speculative-view})))
+        _ (when dry-run?
+            (when-some [^java.util.Map prev (db-pending-blobs (:db-after report))]
+              (.putAll pending-blobs prev)))
         report' (-> report
                     (assoc ::tx-id tx-id)
                     ;; Set max-tx to current tx-id so datoms added during this
                     ;; transaction are visible when searching for duplicates
                     (update :db-after with-max-tx tx-id)
-                    (update :db-after with-pending pending))
+                    (update :db-after with-pending pending pending-blobs))
         {:keys [tx-data id-map]} (assign-entity-ids (:db-before report') es)
         ;; Pre-populate tempids with the tempid -> UUID mapping
         report'' (update report' :tempids merge id-map)
@@ -2355,8 +2573,8 @@
           (dissoc ::dry-run)
           (assoc :tx tx-id))
       (do
-        (store/commit! (db-store (:db-after result)) (seq pending))
+        (store/commit! (db-store (:db-after result)) (seq pending) pending-blobs)
         (-> result
-            (update :db-after with-pending nil)
+            (update :db-after with-pending nil nil)
             ;; Add :tx field with the transaction UUID
             (assoc :tx tx-id))))))
