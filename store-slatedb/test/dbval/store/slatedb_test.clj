@@ -51,6 +51,31 @@
           (is (= [31 44] (mapv :v (d/index-range snapshot :age 0 100))))
           (is (= [11 31 44] (mapv :v (d/index-range @conn :age 0 100)))))))))
 
+(deftest test-slatedb-store-deref-values
+  ;; SlateDB caps keys at 64 KiB; deref attributes keep only a content hash
+  ;; in the keys and put the value bytes into the SlateDB value of a
+  ;; ("blob", <hash>) key — so values far beyond the key cap round-trip
+  (let [conn  (d/conn-from-db
+                (empty-slatedb-db {:doc/name  {:db/unique :db.unique/identity}
+                                   :doc/model {:dbval/deref true}}))
+        ;; ~300 KiB of EDN, far over the 64 KiB key cap
+        model {:objects (mapv (fn [i] {:id i :content (apply str (repeat 100 "x"))})
+                              (range 2500))}]
+    (d/transact! conn [{:doc/name "big" :doc/model model}])
+    (let [v (:doc/model (d/entity @conn [:doc/name "big"]))]
+      (is (not (realized? v)))
+      (is (= model @v)))
+    (testing "re-assert is a no-op"
+      (is (empty? (:tx-data (d/transact! conn [{:doc/name "big" :doc/model model}])))))
+    (testing "blob keys do not leak into index scans"
+      (is (= #{:doc/name :doc/model}
+             (into #{} (map :a) (d/datoms @conn :eavt)))))
+    (testing "update and retract"
+      (d/transact! conn [{:doc/name "big" :doc/model (assoc model :v 2)}])
+      (is (= (assoc model :v 2) @(:doc/model (d/entity @conn [:doc/name "big"]))))
+      (d/transact! conn [[:db/retract [:doc/name "big"] :doc/model (assoc model :v 2)]])
+      (is (nil? (:doc/model (d/entity @conn [:doc/name "big"])))))))
+
 (deftest test-slatedb-store-transaction-isolation
   ;; a failing transaction must leave the store untouched: nothing is
   ;; written until the pending overlay commits atomically
