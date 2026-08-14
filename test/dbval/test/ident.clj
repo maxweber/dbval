@@ -21,9 +21,30 @@
                      :where [?f :ref :ent1]] db)))))
 
 (deftest test-transact!
-  (let [{:keys [db e2]} @*db
+  (let [{:keys [db]} @*db
         db' (d/db-with db [[:db/add :ent1 :ref :ent2]])]
-    (is (= e2 (-> (d/entity db' :ent1) :ref :db/id)))))
+    ;; Datomic parity: a ref to an entity with a :db/ident resolves to the
+    ;; ident keyword in the entity API.
+    (is (= :ent2 (:ref (d/entity db' :ent1))))))
+
+(deftest test-entity-ref-ident-resolution
+  (let [tx (d/with (d/empty-db {:ref  {:db/valueType :db.type/ref}
+                                :refs {:db/valueType :db.type/ref
+                                       :db/cardinality :db.cardinality/many}})
+             [[:db/add "enum" :db/ident :color/red]
+              {:db/id "plain" :name "no ident"}
+              {:db/id "e" :ref "enum" :refs ["enum" "plain"]}])
+        db (:db-after tx)
+        plain-id (get (:tempids tx) "plain")
+        e-id (get (:tempids tx) "e")
+        e (d/entity db e-id)]
+    (is (= :color/red (:ref e)))
+    (is (= #{:color/red (d/entity db plain-id)} (:refs e)))
+    (testing "after touch"
+      (let [e (d/touch (d/entity db e-id))]
+        (is (= :color/red (:ref e)))))
+    (testing "refs to entities without ident stay entities"
+      (is (= plain-id (-> (:refs e) (disj :color/red) first :db/id))))))
 
 (deftest test-entity
   (let [{:keys [db]} @*db]

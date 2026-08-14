@@ -17,13 +17,21 @@
     (when (db/eid-exists? db e)
       (->Entity db e (volatile! false) (volatile! {})))))
 
+(defn- ref-value
+  "Datomic parity: a reference to an entity that has a `:db/ident` is
+   represented by the ident keyword instead of an entity."
+  [db eid]
+  (if-some [ident (:v (first (db/-search db [eid :db/ident])))]
+    ident
+    (entity db eid)))
+
 (defn- entity-attr [db a datoms]
   (if (db/multival? db a)
     (if (db/ref? db a)
-      (reduce #(conj %1 (entity db (:v %2))) #{} datoms)
+      (reduce #(conj %1 (ref-value db (:v %2))) #{} datoms)
       (reduce #(conj %1 (:v %2)) #{} datoms))
     (if (db/ref? db a)
-      (entity db (:v (first datoms)))
+      (ref-value db (:v (first datoms)))
       (:v (first datoms)))))
 
 (defn- -lookup-backwards [db eid attr not-found]
