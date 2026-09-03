@@ -409,9 +409,13 @@
   [db v]
   (if (blob-ref? v)
     v
-    ;; strict UTF-8: getBytes would replace an unpaired surrogate with '?',
-    ;; silently hashing distinct values to the same blob
-    (let [^bytes bs (tuple-codec/utf8-bytes (pr-str v))]
+    ;; canonical representative first: pr-str is scale-sensitive, and
+    ;; 0.50M must hash to the same blob as 0.5M - the byte encoder gives
+    ;; inline attributes exactly that equality. Strict UTF-8: getBytes
+    ;; would replace an unpaired surrogate with '?', silently hashing
+    ;; distinct values to the same blob.
+    (let [v (tuple-codec/canonical-value v)
+          ^bytes bs (tuple-codec/utf8-bytes (pr-str v))]
       (BlobRef. db (sha-256 bs) bs nil v))))
 
 ;; ----------------------------------------------------------------------------
@@ -2269,7 +2273,10 @@
         v         (cond
                     (ref? db a)        (entid-strict db v)
                     (deref-attr? db a) (value->blob-ref db v)
-                    :else              v)
+                    ;; the datom carries the canonical representative
+                    ;; (0.5M, never 0.50M), so tx-data reports the value
+                    ;; every later read returns
+                    :else              (tuple-codec/canonical-value v))
         new-datom (datom e a v tx)
         multival? (multival? db a)
         old-datom ^Datom (if multival?

@@ -198,6 +198,19 @@
     (.setScale d 0)
     d))
 
+(defn canonical-value
+  "Returns the representative of `x` that decoding its encoded bytes
+   returns: BigDecimals are stripped of trailing zeros (integral values
+   restored to scale 0 within [[restore-plain-integer]]'s bound), every
+   other type passes through unchanged. Datoms and blob content hashes must
+   carry this representative so that index bytes, deref hashes, tx-data and
+   reads all agree on one value - 0.50M and 0.5M are the same number and
+   must behave as the same value everywhere."
+  [x]
+  (if (instance? java.math.BigDecimal x)
+    (restore-plain-integer (.stripTrailingZeros ^java.math.BigDecimal x))
+    x))
+
 (defn- write-decimal
   "Order-preserving BigDecimal encoding:
 

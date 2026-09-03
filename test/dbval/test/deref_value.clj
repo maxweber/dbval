@@ -214,3 +214,21 @@
     (let [conn (d/conn-from-db (d/empty-db schema {:db-file db-file}))]
       (is (= model-v1 @(:doc/model (d/entity @conn [:doc/name "a"]))))
       (store/close! (db/db-store @conn)))))
+
+(deftest test-bigdec-scale-variants
+  ;; deref attributes hash the canonical representative, giving them the
+  ;; same numeric equality the byte encoding gives inline attributes:
+  ;; 0.50M finds, deduplicates and retracts against a stored 0.5M
+  (let [conn (conn)]
+    (d/transact! conn [{:doc/name "a" :doc/model 0.5M}
+                       {:doc/name "b" :doc/model 0.50M}])
+    (let [ea (:db/id (d/entity @conn [:doc/name "a"]))
+          eb (:db/id (d/entity @conn [:doc/name "b"]))]
+      (testing "an index lookup with the other scale finds the datom"
+        (is (= 1 (count (vec (d/datoms @conn :eavt ea :doc/model 0.50M))))))
+      (testing "both scales hash to the same blob"
+        (is (= (:doc/model (d/entity @conn ea))
+               (:doc/model (d/entity @conn eb)))))
+      (testing "retracting with the other scale removes the datom"
+        (d/transact! conn [[:db/retract ea :doc/model 0.50M]])
+        (is (empty? (vec (d/datoms @conn :eavt ea :doc/model))))))))
