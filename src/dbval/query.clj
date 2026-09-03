@@ -411,14 +411,19 @@
         (let [a-el (nth (substitute-constants context pattern) 1)]
           (when (attr? a-el)
             (let [getter (getter-fn (:attrs rel) v-el)
-                  vals   (into [] (comp (map getter) (distinct))
-                               (:tuples rel))]
-              (when (if (db/deref-attr? db a-el)
-                      ;; bound BlobRefs (e.g. from another deref pattern)
-                      ;; hash-join fine; only raw values need the lookup
-                      (some (fn [v] (not (db/blob-ref? v))) vals)
-                      (some decimal? vals))
-                vals))))))))
+                  tuples (:tuples rel)
+                  ;; streaming decision first: the common shapes that keep
+                  ;; the default scan-and-hash-join path must not pay for
+                  ;; materializing a distinct set of the bound values
+                  pushdown? (if (db/deref-attr? db a-el)
+                              ;; bound BlobRefs (e.g. from another deref
+                              ;; pattern) hash-join fine; only raw values
+                              ;; need the per-value lookup
+                              (some (fn [t] (not (db/blob-ref? (getter t))))
+                                    tuples)
+                              (some (fn [t] (decimal? (getter t))) tuples))]
+              (when pushdown?
+                (into [] (comp (map getter) (distinct)) tuples)))))))))
 
 (defn- lookup-pattern-bound-v
   "Builds the pattern's relation by searching once per bound value of the
