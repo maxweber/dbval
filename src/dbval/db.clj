@@ -474,6 +474,25 @@
        :length (.length s)}))
   s)
 
+(defn- validate-decimal-size
+  ;; the encoded decimal is one byte per significant digit plus 7 framing
+  ;; bytes (see dbval.tuple/write-decimal); trailing zeros are stripped
+  ;; before encoding, so only the stripped precision counts. Every other
+  ;; numeric encoding is <= 9 bytes - this is the one number type whose key
+  ;; size grows with the value, so it needs the same bound as strings.
+  ^java.math.BigDecimal [attr ^java.math.BigDecimal d]
+  (let [digits (.precision (.stripTrailingZeros d))]
+    (when (> (+ digits 7) max-inline-value-bytes)
+      (util/raise "Value of attribute " attr " has " digits " significant "
+                  "digits and serializes to more than " max-inline-value-bytes
+                  " bytes; it cannot be stored inside index keys. Flag the "
+                  "attribute with {:dbval/deref true} to store its values "
+                  "in the blob area instead."
+        {:error :transact/value-too-large
+         :attribute attr
+         :digits digits})))
+  d)
+
 (defn serialize-value
   [db attr v]
   (cond
@@ -494,6 +513,9 @@
 
     (sequential? v)
     (serialize-tuple attr v)
+
+    (instance? java.math.BigDecimal v)
+    (validate-decimal-size attr v)
 
     (tuple-codec/supported-value? v)
     v

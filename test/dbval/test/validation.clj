@@ -71,3 +71,15 @@
     (is (thrown-with-msg? Throwable #"unsupported type"
           (vec (d/datoms (d/empty-db {:amount {:db/index true}})
                          :avet :amount 1/3))))))
+
+(deftest test-decimal-size-cap
+  ;; a BigDecimal is the one number type whose encoded size grows with the
+  ;; value (one byte per significant digit); it obeys the same inline cap
+  ;; as strings instead of writing oversized index keys
+  (let [huge (java.math.BigDecimal.
+               (java.math.BigInteger. (.repeat "9" 60001)))]
+    (is (thrown-with-msg? Throwable #"significant"
+          (d/db-with (d/empty-db) [[:db/add "e1" :amount huge]]))))
+  ;; scientific notation with a huge exponent stays tiny and must pass
+  (let [db (d/db-with (d/empty-db) [[:db/add "e1" :amount 1E+100000M]])]
+    (is (= 1E+100000M (d/q '[:find ?v . :where [_ :amount ?v]] db)))))
