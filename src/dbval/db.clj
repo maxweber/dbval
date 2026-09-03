@@ -425,7 +425,7 @@
   (vec components))
 
 (defn serialize-tuple
-  [x]
+  [attr x]
   (cond
     (or (keyword? x)
         (symbol? x)
@@ -435,10 +435,20 @@
 
     (sequential? x)
     (apply tuple
-           (map serialize-tuple
+           (map (fn [item] (serialize-tuple attr item))
                 x))
+
+    (tuple-codec/supported-value? x)
+    x
+
     :else
-    x))
+    (util/raise "Value of attribute " attr " contains an element of "
+                "unsupported type " (class x) " and cannot be stored inside "
+                "index keys. Flag the attribute with {:dbval/deref true} to "
+                "store arbitrary edn values in the blob area instead."
+      {:error :transact/unsupported-value-type
+       :attribute attr
+       :value-type (class x)})))
 
 (def max-inline-value-bytes
   "Maximum size of a serialized value inside an index key. Values are stored
@@ -483,10 +493,22 @@
     (validate-inline-size attr (pr-str v))
 
     (sequential? v)
-    (serialize-tuple v)
+    (serialize-tuple attr v)
+
+    (tuple-codec/supported-value? v)
+    v
 
     :else
-    v))
+    (util/raise "Value of attribute " attr " has unsupported type " (class v)
+                " and cannot be stored inside index keys. Supported are "
+                "strings, keywords, symbols, maps, dates, booleans, UUIDs, "
+                "byte arrays, integers, bigints, doubles, floats, bigdecs "
+                "and sequential collections of these. Flag the attribute "
+                "with {:dbval/deref true} to store arbitrary edn values in "
+                "the blob area instead."
+      {:error :transact/unsupported-value-type
+       :attribute attr
+       :value-type (class v)})))
 
 (defn attr-sort-key
   "Returns the serialized key used for attribute components in indexes."
@@ -538,14 +560,16 @@
         (list (name order) t e (attr-sort-key a) (serialize-value db a v) added)
         ))
     (catch Exception e
-      (if (= :transact/value-too-large (:error (ex-data e)))
-        ;; pass through unchanged: wrapping would put the oversized datom
-        ;; into ex-data and thereby into every log of the error
-        (throw e)
-        (throw (ex-info "tuple-list failed"
-                        {:order order
-                         :datom datom}
-                        e))))))
+      (let [err (:error (ex-data e))]
+        (if (and (keyword? err) (= "transact" (namespace err)))
+          ;; pass validation anomalies through unchanged: wrapping would put
+          ;; the offending datom into ex-data and thereby into every log of
+          ;; the error
+          (throw e)
+          (throw (ex-info "tuple-list failed"
+                          {:order order
+                           :datom datom}
+                          e)))))))
 
 (defn tuple-range
   "Turns the `components` into a tuple and returns a vector of the begin

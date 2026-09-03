@@ -318,6 +318,28 @@
                     {:value x
                      :type (class x)}))))
 
+(defn supported-value?
+  "True when [[pack]] can encode `x` as a tuple component - the single
+   source of truth for the supported-type policy. Callers validate against
+   this at their own boundary with their own error context; `write-value`'s
+   throw remains the backstop."
+  [x]
+  (or (nil? x)
+      (string? x)
+      (bytes? x)
+      (instance? Boolean x)
+      (instance? Long x)
+      (instance? Integer x)
+      (instance? Short x)
+      (instance? Byte x)
+      (instance? java.math.BigInteger x)
+      (instance? clojure.lang.BigInt x)
+      (instance? Double x)
+      (instance? Float x)
+      (instance? java.math.BigDecimal x)
+      (uuid? x)
+      (instance? java.util.List x)))
+
 (defn pack
   "Encodes the tuple `components` (a sequential collection) into a byte
    array that sorts in unsigned lexicographic byte order."

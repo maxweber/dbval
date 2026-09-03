@@ -49,3 +49,25 @@
     (d/db-with (db*) [[:db/add "e3" :name "Igor"]])
     ;; Different attribute :nick should work
     (d/db-with (db*) [[:db/add "e3" :nick "Ivan"]])))
+
+(deftest test-unsupported-value-types
+  ;; rejected with attribute context at the serialization boundary instead
+  ;; of an opaque "pack failed" from inside the byte encoder
+  (let [db* (fn [] (d/empty-db))]
+    (are [tx] (thrown-with-msg? Throwable #"unsupported type"
+                (d/db-with (db*) tx))
+      [[:db/add "e1" :amount 1/3]]
+      [{:db/id "e1" :amount (java.util.concurrent.atomic.AtomicLong. 5)}]
+      [[:db/add "e1" :initial \a]]
+      ;; nested inside a stored collection
+      [[:db/add "e1" :pair [1 1/3]]])
+    (let [ex (try
+               (d/db-with (db*) [[:db/add "e1" :amount 1/3]])
+               nil
+               (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :transact/unsupported-value-type (:error (ex-data ex))))
+      (is (= :amount (:attribute (ex-data ex)))))
+    ;; the read path rejects unsupported search-pattern values the same way
+    (is (thrown-with-msg? Throwable #"unsupported type"
+          (vec (d/datoms (d/empty-db {:amount {:db/index true}})
+                         :avet :amount 1/3))))))
