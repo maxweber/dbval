@@ -420,31 +420,6 @@
 
 ;; ----------------------------------------------------------------------------
 
-(defn serialize-tuple
-  [attr x]
-  (cond
-    (or (keyword? x)
-        (symbol? x)
-        (string? x)
-        (instance? java.util.Date x))
-    (pr-str x)
-
-    (sequential? x)
-    (mapv (fn [item] (serialize-tuple attr item))
-          x)
-
-    (tuple-codec/supported-value? x)
-    x
-
-    :else
-    (util/raise "Value of attribute " attr " contains an element of "
-                "unsupported type " (class x) " and cannot be stored inside "
-                "index keys. Flag the attribute with {:dbval/deref true} to "
-                "store arbitrary edn values in the blob area instead."
-      {:error :transact/unsupported-value-type
-       :attribute attr
-       :value-type (class x)})))
-
 (def max-inline-value-bytes
   "Maximum size of a serialized value inside an index key. Values are stored
    in every index key of their datom, and SlateDB caps keys at 64 KiB, so
@@ -469,6 +444,23 @@
        :length (.length s)}))
   s)
 
+(defn- validate-inline-string
+  ;; surrogate check here, not only in the byte encoder: raising at the
+  ;; serialization boundary carries the attribute and skips the
+  ;; "set-add! failed"/"pack failed" wrappers that would dump the datom
+  ;; into ex-data and logs
+  ^String [attr ^String s]
+  (let [i (tuple-codec/unpaired-surrogate-index s)]
+    (when-not (neg? i)
+      (util/raise "Value of attribute " attr " contains an unpaired "
+                  "surrogate at char " i " and has no UTF-8 encoding (a "
+                  "typical source is a string truncated in the middle of "
+                  "an emoji by subs)."
+        {:error :transact/invalid-string
+         :attribute attr
+         :char-index i})))
+  (validate-inline-size attr s))
+
 (defn- validate-decimal-size
   ;; the encoded decimal is one byte per significant digit plus 7 framing
   ;; bytes (see dbval.tuple/write-decimal); trailing zeros are stripped
@@ -488,6 +480,33 @@
          :digits digits})))
   d)
 
+(defn serialize-tuple
+  [attr x]
+  (cond
+    (or (keyword? x)
+        (symbol? x)
+        (string? x)
+        (instance? java.util.Date x))
+    ;; nested components need the same guards as top-level values: an
+    ;; oversized or surrogate-carrying string is no better inside a tuple
+    (validate-inline-string attr (pr-str x))
+
+    (sequential? x)
+    (mapv (fn [item] (serialize-tuple attr item))
+          x)
+
+    (tuple-codec/supported-value? x)
+    x
+
+    :else
+    (util/raise "Value of attribute " attr " contains an element of "
+                "unsupported type " (class x) " and cannot be stored inside "
+                "index keys. Flag the attribute with {:dbval/deref true} to "
+                "store arbitrary edn values in the blob area instead."
+      {:error :transact/unsupported-value-type
+       :attribute attr
+       :value-type (class x)})))
+
 (defn serialize-value
   [db attr v]
   (cond
@@ -504,7 +523,7 @@
         (symbol? v)
         (string? v)
         (instance? java.util.Date v))
-    (validate-inline-size attr (pr-str v))
+    (validate-inline-string attr (pr-str v))
 
     (sequential? v)
     (serialize-tuple attr v)
@@ -1982,14 +2001,41 @@
          tx
          false))
 
+(def max-key-bytes
+  "Hard cap for one encoded index key: SlateDB rejects keys over 64 KiB.
+   The per-value caps (max-inline-value-bytes, the decimal digit bound)
+   catch oversized single components with attribute context; this backstop
+   catches what they cannot see, e.g. a tuple value whose components are
+   each within bounds but sum past the limit."
+  65536)
+
 (defn set-add!
   [db ^java.util.NavigableSet pending tuple]
   (try
-    (.add pending (pack tuple))
+    (let [^bytes bs (pack tuple)]
+      (when (< max-key-bytes (alength bs))
+        (let [attr (edn/read-string
+                     (nth tuple (case (first tuple)
+                                  "eavt" 2, "aevt" 1, "avet" 1, "teav" 3)))]
+          (util/raise "Datom of attribute " attr " encodes to "
+                      (alength bs) " bytes, over the " max-key-bytes
+                      " byte index-key limit. Flag the attribute with "
+                      "{:dbval/deref true} to store its values in the blob "
+                      "area instead."
+            {:error :transact/value-too-large
+             :attribute attr
+             :key-bytes (alength bs)})))
+      (.add pending bs))
     (catch Exception e
-      (throw (ex-info "set-add! failed"
-                      {:tuple tuple}
-                      e))))
+      (let [err (:error (ex-data e))]
+        (if (and (keyword? err) (= "transact" (namespace err)))
+          ;; pass validation anomalies through unchanged: wrapping would put
+          ;; the offending datom into ex-data and thereby into every log of
+          ;; the error
+          (throw e)
+          (throw (ex-info "set-add! failed"
+                          {:tuple tuple}
+                          e))))))
   db)
 
 (defn all-tuples

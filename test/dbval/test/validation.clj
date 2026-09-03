@@ -83,3 +83,29 @@
   ;; scientific notation with a huge exponent stays tiny and must pass
   (let [db (d/db-with (d/empty-db) [[:db/add "e1" :amount 1E+100000M]])]
     (is (= 1E+100000M (d/q '[:find ?v . :where [_ :amount ?v]] db)))))
+
+(deftest test-oversized-nested-and-total-keys
+  ;; a string nested inside a tuple value obeys the same inline cap as a
+  ;; top-level string (it used to bypass validate-inline-size entirely)
+  (is (thrown-with-msg? Throwable #"more than"
+        (d/db-with (d/empty-db)
+                   [[:db/add "e1" :pair [1 (.repeat "x" 70000)]]])))
+  ;; components can each pass the per-value cap and still sum past the
+  ;; 64 KiB SlateDB key limit; the packed-key backstop rejects those
+  (let [s (.repeat "y" 40000)]
+    (is (thrown-with-msg? Throwable #"index-key limit"
+          (d/db-with (d/empty-db) [[:db/add "e1" :pair [s s s]]])))))
+
+(deftest test-unpaired-surrogate-strings
+  ;; rejected with attribute context at the serialization boundary, not
+  ;; from inside the byte encoder with the datom dumped into ex-data
+  (let [ex (try
+             (d/db-with (d/empty-db) [[:db/add "e1" :caption "a\ud800b"]])
+             nil
+             (catch clojure.lang.ExceptionInfo e e))]
+    (is (= :transact/invalid-string (:error (ex-data ex))))
+    (is (= :caption (:attribute (ex-data ex))))
+    (is (nil? (:tuple (ex-data ex)))))
+  ;; nested inside a tuple value
+  (is (thrown-with-msg? Throwable #"unpaired surrogate"
+        (d/db-with (d/empty-db) [[:db/add "e1" :pair ["a\ud800b" 1]]]))))

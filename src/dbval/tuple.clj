@@ -298,17 +298,14 @@
                                     mask))))
         (.writeByte out (int (bit-xor 0x00 mask)))))))
 
-(defn utf8-bytes
-  "Encodes `s` as UTF-8, rejecting unpaired surrogates instead of silently
-   replacing them with '?' like String.getBytes does. Distinct strings must
-   never alias to the same bytes: under replacement, \"a\\ud800b\" and
-   \"a?b\" would encode (and content-hash) identically, so lookups and
-   retractions would hit the wrong datom. A typical source of unpaired
+(defn unpaired-surrogate-index
+  "Index of the first unpaired surrogate in `s`, or -1 when `s` is valid
+   UTF-16 and therefore has a UTF-8 encoding. A typical source of unpaired
    surrogates is a string truncated in the middle of an emoji by `subs`."
-  ^bytes [^String s]
+  ^long [^String s]
   (let [n (.length s)]
     (loop [i 0]
-      (when (< i n)
+      (if (< i n)
         (let [c (.charAt s i)]
           (cond
             (and (Character/isHighSurrogate c)
@@ -317,13 +314,25 @@
             (recur (+ i 2))
 
             (Character/isSurrogate c)
-            (throw (ex-info "String contains an unpaired surrogate and has no UTF-8 encoding"
-                            {:char-index i
-                             :char (int c)}))
+            i
 
             :else
-            (recur (inc i))))))
-    (.getBytes s java.nio.charset.StandardCharsets/UTF_8)))
+            (recur (inc i))))
+        -1))))
+
+(defn utf8-bytes
+  "Encodes `s` as UTF-8, rejecting unpaired surrogates instead of silently
+   replacing them with '?' like String.getBytes does. Distinct strings must
+   never alias to the same bytes: under replacement, \"a\\ud800b\" and
+   \"a?b\" would encode (and content-hash) identically, so lookups and
+   retractions would hit the wrong datom."
+  ^bytes [^String s]
+  (let [i (unpaired-surrogate-index s)]
+    (when-not (neg? i)
+      (throw (ex-info "String contains an unpaired surrogate and has no UTF-8 encoding"
+                      {:char-index i
+                       :char (int (.charAt s (int i)))}))))
+  (.getBytes s java.nio.charset.StandardCharsets/UTF_8))
 
 (defn- write-value
   [^IByteBuf out x nested?]
