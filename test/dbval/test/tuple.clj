@@ -60,7 +60,11 @@
   (gen/fmap (fn [[unscaled scale]]
               (java.math.BigDecimal. (java.math.BigInteger/valueOf unscaled)
                                      (int scale)))
-            (gen/tuple gen/large-integer (gen/choose -25 25))))
+            (gen/tuple gen/large-integer
+                       ;; huge exponents exercise the compact encoding,
+                       ;; which stores the exponent instead of zero digits
+                       (gen/one-of [(gen/choose -25 25)
+                                    (gen/choose -100000 100000)]))))
 
 (defn- normalize
   "Maps a value to the representation `unpack` returns, for comparing
@@ -117,6 +121,28 @@
   (is (= [0.5M] (tuple/unpack (tuple/pack [0.50M]))))
   (is (= [500M] (tuple/unpack (tuple/pack [5E+2M]))))
   (is (= [0M] (tuple/unpack (tuple/pack [0.000M])))))
+
+(deftest test-bigdec-compact-encoding
+  ;; one byte per significant digit plus 7 bytes of framing - the exponent
+  ;; lives in its own int32 field, so scientific-notation values never
+  ;; materialize their zeros (1E+100000M is 8 bytes, not 100,008)
+  (is (= 8 (alength (tuple/pack [1E+100000M]))))
+  (is (= 8 (alength (tuple/pack [-1E+100000M]))))
+  (is (= 8 (alength (tuple/pack [1E-100000M]))))
+  (is (java.util.Arrays/equals (tuple/pack [1E+100000M])
+                               (tuple/pack [10E+99999M])))
+  ;; decoding restores plain integers only within the trailing-zero bound;
+  ;; a huge exponent round-trips in compact form
+  (is (= [500M] (tuple/unpack (tuple/pack [5E+2M]))))
+  (let [[^java.math.BigDecimal d] (tuple/unpack (tuple/pack [1E+100000M]))]
+    (is (= java.math.BigInteger/ONE (.unscaledValue d)))
+    (is (= -100000 (.scale d)))))
+
+(deftest test-bigdec-exponent-bound
+  ;; the adjusted exponent is stored as an int32; beyond that the offset
+  ;; encoding would wrap and mis-sort, so such values must be rejected
+  (is (thrown? clojure.lang.ExceptionInfo (tuple/pack [1E+2147483647M])))
+  (is (= [1E+2147483646M] (tuple/unpack (tuple/pack [1E+2147483646M])))))
 
 (deftest test-bigdec-examples
   ;; the motivating regression: 0.5M went through FoundationDB's

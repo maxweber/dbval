@@ -167,13 +167,28 @@
     (write-be out (bit-and bits 0xffffffff) 4)))
 
 (defn- canonical-decimal
-  "Strips trailing zeros and keeps integral values at scale 0, so numerically
-   equal BigDecimals (0.5M vs 0.50M, 500M vs 5E+2M) encode identically."
+  "Strips trailing zeros, so numerically equal BigDecimals (0.5M vs 0.50M,
+   500M vs 5E+2M) encode identically. Never expands the unscaled value:
+   1E+100000M stays (unscaled 1, scale -100000) instead of materializing
+   100,000 zero digits into the encoding."
   ^java.math.BigDecimal [^java.math.BigDecimal d]
-  (let [d (.stripTrailingZeros d)]
-    (if (neg? (.scale d))
-      (.setScale d 0)
-      d)))
+  (.stripTrailingZeros d))
+
+;; decoded integral values are returned at scale 0 (500 instead of 5E+2),
+;; but only up to this many restored trailing zeros - a huge exponent
+;; (1E+100000M) must never materialize its zero digits on read
+(def ^:private ^:const max-restored-trailing-zeros 100)
+
+(defn- restore-plain-integer
+  "Returns integral `d` at scale 0 when that adds at most
+   `max-restored-trailing-zeros` zero digits; otherwise returns `d`
+   unchanged. Purely cosmetic: `canonical-decimal` strips trailing zeros
+   before encoding, so both representations produce the same bytes."
+  ^java.math.BigDecimal [^java.math.BigDecimal d]
+  (if (and (neg? (.scale d))
+           (<= (- (.scale d)) max-restored-trailing-zeros))
+    (.setScale d 0)
+    d))
 
 (defn- write-decimal
   "Order-preserving BigDecimal encoding:
@@ -189,7 +204,11 @@
    digits lexicographically then equals numeric comparison; the 0x00
    terminator sorts a digit-prefix (fewer digits, e.g. 0.5 vs 0.55) first,
    which is numerically correct. XOR-ing the negative encoding reverses the
-   order for negative values."
+   order for negative values.
+
+   The adjusted exponent must fit an int32 (only violated near BigDecimal's
+   scale limits, e.g. 1E+2147483647M); beyond that the offset encoding would
+   wrap and mis-sort, so such values are rejected."
   [^java.io.ByteArrayOutputStream out ^java.math.BigDecimal d]
   (.write out type-decimal)
   (let [d (canonical-decimal d)]
@@ -198,6 +217,10 @@
       (let [abs (.abs d)
             digits (str (.unscaledValue abs))
             exponent (- (.precision abs) (.scale abs))
+            _ (when-not (<= Integer/MIN_VALUE exponent Integer/MAX_VALUE)
+                (throw (ex-info "BigDecimal adjusted exponent exceeds the int32 range of the encoding"
+                                {:value d
+                                 :adjusted-exponent exponent})))
             negative? (neg? (.signum d))
             mask (if negative? 0xff 0x00)]
         (.write out (int (if negative?
@@ -393,10 +416,8 @@
                           (recur (inc i))))))
             unscaled (java.math.BigInteger. (str digits))
             scale (- (.length digits) exponent)
-            abs (java.math.BigDecimal. unscaled (int scale))
-            abs (if (neg? (.scale abs))
-                  (.setScale abs 0)
-                  abs)]
+            abs (restore-plain-integer
+                  (java.math.BigDecimal. unscaled (int scale)))]
         [(if (= mask 0xff) (.negate abs) abs)
          end]))))
 
