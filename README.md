@@ -69,9 +69,13 @@ smaller and is faster to query.
 Back to FoundationDB, its keys and values are just byte arrays. The key contains
 a tuple and its byte array representation allows to sort it, even if it is a mix
 of different types (String, double, UUID, nested tuples, etc.). You will notice
-that you can represent a (Datomic) datom as a tuple. Luckily, the tuple to byte
-array logic is available via [Tuple
-class](https://apple.github.io/foundationdb/javadoc/com/apple/foundationdb/tuple/Tuple.html).
+that you can represent a (Datomic) datom as a tuple. dbval implements this
+tuple-to-byte-array encoding itself in the `dbval.tuple` namespace: it is
+byte-compatible with FoundationDB's [Tuple
+class](https://apple.github.io/foundationdb/javadoc/com/apple/foundationdb/tuple/Tuple.html)
+for the types dbval ever wrote through it, and adds an order-preserving
+BigDecimal type code (0x40) the FoundationDB layer does not have - see the
+`dbval.tuple` namespace docstring for the format details.
 
 One question that might arise is how you can have different indexes in a
 FoundationDB-like model. As you can see from the `create table` SQL statement
@@ -188,7 +192,7 @@ point is to run the unit tests via:
 
 - Also adapt the ClojureScript parts (broken at the moment).
 
-    - There is [a JS libary](https://github.com/josephg/fdb-tuple) that implements the FoundationDB tuple encoding.
+    - There is [a JS libary](https://github.com/josephg/fdb-tuple) that implements the FoundationDB tuple encoding (dbval's BigDecimal type code 0x40 would have to be added to it).
     
     - Doing [synchronous SQLite reads and writes in JavaScript](https://blog.cloudflare.com/sqlite-in-durable-objects/#reads-and-writes-are-synchronous) is viable (no need to make everything async).
 

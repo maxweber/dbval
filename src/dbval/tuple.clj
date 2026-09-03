@@ -6,12 +6,14 @@
    property every dbval index relies on for range scans.
 
    The format is byte-compatible with the FoundationDB tuple layer
-   (https://github.com/apple/foundationdb/blob/main/design/tuple.md) for all
-   types that layer supports: nil, byte arrays, strings, nested tuples,
-   integers (including arbitrary precision), floats, doubles, booleans and
-   UUIDs. Byte compatibility means existing stores written via
-   com.apple.foundationdb.tuple.Tuple stay readable, and the implementation
-   can be differential-tested against the FoundationDB one.
+   (https://github.com/apple/foundationdb/blob/main/design/tuple.md) for
+   every type dbval ever wrote through that layer: nil, byte arrays,
+   strings, nested tuples, integers (including arbitrary precision),
+   floats, doubles, booleans and UUIDs. Byte compatibility means existing
+   stores written via com.apple.foundationdb.tuple.Tuple stay readable, and
+   the implementation can be differential-tested against the FoundationDB
+   one. (Versionstamps, the one FoundationDB tuple type dbval never used,
+   are not supported.)
 
    On top of that the format adds one type code of its own:
 
@@ -27,7 +29,14 @@
    Values of unsupported types are rejected with an exception. This matters:
    the FoundationDB Java implementation falls back to Number.longValue() for
    unknown Number subclasses, which silently truncated BigDecimals
-   (0.5M was stored as 0)."
+   (0.5M was stored as 0).
+
+   Stores written by the FoundationDB-backed code may still contain such
+   truncated datoms: BigDecimals - and clojure.lang.BigInts beyond the long
+   range - were stored under long-typed keys. They decode as those longs
+   and cannot be matched or retracted by the original value. When upgrading
+   such a store, scan attributes that ever held big decimals or bigints for
+   long-typed values and re-assert them."
   (:refer-clojure :exclude [range]))
 
 (set! *warn-on-reflection* true)
