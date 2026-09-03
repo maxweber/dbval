@@ -15,7 +15,8 @@
    cannot load without it."
   (:require
     [clojure.string :as str]
-    [dbval.store :as store])
+    [dbval.store :as store]
+    [dbval.tuple :as tuple])
   (:import
     [java.util.concurrent CompletableFuture]
     [io.slatedb.uniffi Db DbBuilder ObjectStore DbIterator KeyValue WriteBatch
@@ -28,10 +29,11 @@
   (byte-array 0))
 
 (defn- blob-key
-  "SlateDB key for the blob with the given content hash."
+  "SlateDB key for the blob with the given content hash. `dbval.tuple`
+   encodes strings and byte arrays byte-identically to the FoundationDB
+   tuple layer this used before, so existing SlateDB files stay readable."
   ^bytes [^bytes hash]
-  (.pack (com.apple.foundationdb.tuple.Tuple/from
-          (into-array Object ["blob" hash]))))
+  (tuple/pack ["blob" hash]))
 
 (defonce ^:private native-lib-loaded
   ;; The slatedb-uniffi jar bundles the native library in JNA resource layout
