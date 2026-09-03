@@ -13,13 +13,16 @@
    com.apple.foundationdb.tuple.Tuple stay readable, and the implementation
    can be differential-tested against the FoundationDB one.
 
-   On top of that the format adds a type code the FoundationDB layer does
-   not have:
+   On top of that the format adds one type code of its own:
 
-   - 0x23 BigDecimal, encoded order-preservingly (see `write-decimal`).
-     FoundationDB never standardized a decimal type because its tuples must
-     be readable from every binding language; these tuples are only ever
-     read by Clojure on the JVM, so that constraint does not apply here.
+   - 0x40 BigDecimal, encoded order-preservingly (see `write-decimal`).
+     0x40 comes from the 0x40-0x4F range the FoundationDB spec reserves for
+     third-party extensions. (0x23/0x24 are reserved by that spec for a
+     future arbitrary-precision decimal with a different, non-order-
+     preserving encoding, so they must not be reused.) FoundationDB never
+     shipped a decimal type because its tuples must be readable from every
+     binding language; these tuples are only ever read by Clojure on the
+     JVM, so that constraint does not apply here.
 
    Values of unsupported types are rejected with an exception. This matters:
    the FoundationDB Java implementation falls back to Number.longValue() for
@@ -38,7 +41,9 @@
 (def ^:private ^:const type-pos-bignum 0x1d)
 (def ^:private ^:const type-float 0x20)
 (def ^:private ^:const type-double 0x21)
-(def ^:private ^:const type-decimal 0x23)
+;; 0x40 is from the user-extension range of the FoundationDB tuple spec;
+;; 0x23/0x24 are reserved there for an incompatible decimal encoding
+(def ^:private ^:const type-decimal 0x40)
 (def ^:private ^:const type-false 0x26)
 (def ^:private ^:const type-true 0x27)
 (def ^:private ^:const type-uuid 0x30)

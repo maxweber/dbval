@@ -6,8 +6,9 @@
    fdb-java is a :dev-only dependency that serves as the differential-testing
    oracle here; the library itself no longer depends on it.
 
-   BigDecimal is dbval's own extension (type code 0x23), so it has no oracle;
-   its ordering property is checked generatively instead."
+   BigDecimal is dbval's own extension (type code 0x40, from the user-type
+   range of the FoundationDB spec), so it has no oracle; its ordering
+   property is checked generatively instead."
   (:require
     [clojure.test :as t :refer [is deftest testing]]
     [clojure.test.check.clojure-test :refer [defspec]]
