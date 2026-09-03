@@ -409,7 +409,9 @@
   [db v]
   (if (blob-ref? v)
     v
-    (let [^bytes bs (.getBytes (pr-str v) java.nio.charset.StandardCharsets/UTF_8)]
+    ;; strict UTF-8: getBytes would replace an unpaired surrogate with '?',
+    ;; silently hashing distinct values to the same blob
+    (let [^bytes bs (tuple-codec/utf8-bytes (pr-str v))]
       (BlobRef. db (sha-256 bs) bs nil v))))
 
 ;; ----------------------------------------------------------------------------

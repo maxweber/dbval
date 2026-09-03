@@ -175,6 +175,19 @@
         (tuple/pack [(java.util.concurrent.atomic.AtomicLong. 5)])))
   (is (thrown? clojure.lang.ExceptionInfo (tuple/pack [\a]))))
 
+(deftest test-unpaired-surrogates-rejected
+  ;; String.getBytes silently replaces unpaired surrogates with '?',
+  ;; aliasing distinct strings to identical key bytes (fdb-java rejected
+  ;; them as malformed, and so does dbval)
+  (is (thrown? clojure.lang.ExceptionInfo (tuple/pack ["a\ud800b"])))
+  (is (thrown? clojure.lang.ExceptionInfo (tuple/pack ["\udc00"])))
+  ;; a caption truncated in the middle of an emoji by subs
+  (is (thrown? clojure.lang.ExceptionInfo (tuple/pack [(subs "ab😀" 0 3)])))
+  ;; valid pairs still encode byte-compatibly and round-trip
+  (let [s "caption 😀"]
+    (is (java.util.Arrays/equals (tuple/pack [s]) (fdb-pack [s])))
+    (is (= [s] (tuple/unpack (tuple/pack [s]))))))
+
 (deftest test-nan-byte-compatibility
   ;; NaN payload bits are packed raw, matching fdb-java; doubleToLongBits
   ;; would canonicalize every NaN, breaking byte compatibility and

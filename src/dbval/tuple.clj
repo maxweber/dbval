@@ -243,6 +243,33 @@
                                     mask))))
         (.write out (int (bit-xor 0x00 mask)))))))
 
+(defn utf8-bytes
+  "Encodes `s` as UTF-8, rejecting unpaired surrogates instead of silently
+   replacing them with '?' like String.getBytes does. Distinct strings must
+   never alias to the same bytes: under replacement, \"a\\ud800b\" and
+   \"a?b\" would encode (and content-hash) identically, so lookups and
+   retractions would hit the wrong datom. A typical source of unpaired
+   surrogates is a string truncated in the middle of an emoji by `subs`."
+  ^bytes [^String s]
+  (let [n (.length s)]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt s i)]
+          (cond
+            (and (Character/isHighSurrogate c)
+                 (< (inc i) n)
+                 (Character/isLowSurrogate (.charAt s (inc i))))
+            (recur (+ i 2))
+
+            (Character/isSurrogate c)
+            (throw (ex-info "String contains an unpaired surrogate and has no UTF-8 encoding"
+                            {:char-index i
+                             :char (int c)}))
+
+            :else
+            (recur (inc i))))))
+    (.getBytes s java.nio.charset.StandardCharsets/UTF_8)))
+
 (defn- write-value
   [^java.io.ByteArrayOutputStream out x nested?]
   (cond
@@ -253,7 +280,7 @@
 
     (string? x)
     (do (.write out type-string)
-        (write-escaped out (.getBytes ^String x java.nio.charset.StandardCharsets/UTF_8)))
+        (write-escaped out (utf8-bytes x)))
 
     (bytes? x)
     (do (.write out type-bytes)
