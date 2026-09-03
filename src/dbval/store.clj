@@ -1,10 +1,10 @@
 (ns dbval.store
   "Storage abstraction for dbval.
 
-   A store is an ordered set of byte-array keys (FoundationDB-tuple encoded
-   datoms, see `dbval.db`) that supports range scans over committed data and
-   atomic batch commits. Conceptually the store is a sorted set, mimicking a
-   transactional ordered key-value store like FoundationDB.
+   A store is an ordered set of byte-array keys (tuple-encoded datoms, see
+   `dbval.tuple` and `dbval.db`) that supports range scans over committed
+   data and atomic batch commits. Conceptually the store is a sorted set,
+   mimicking a transactional ordered key-value store like FoundationDB.
 
    Datoms of deref attributes (see `dbval.db`) keep only a content hash in
    their keys; the value bytes live in a separate content-addressed blob
