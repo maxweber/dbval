@@ -393,15 +393,34 @@
   "Reads an escaped region starting at `pos`. Returns [bytes end-pos]."
   [^bytes bs ^long pos]
   (let [[len end] (unescaped-length bs pos)
-        result (byte-array (long len))]
-    (loop [i (long pos)
-           o 0]
-      (when (< o (long len))
-        (let [b (aget bs i)]
-          (aset result o b)
-          (recur (if (zero? b) (+ i 2) (inc i))
-                 (inc o)))))
-    [result end]))
+        len (long len)
+        end (long end)]
+    (if (= len (- end 1 pos))
+      ;; no escapes (the common case - strings and hashes almost never
+      ;; contain NUL): one bulk copy instead of a byte-at-a-time loop
+      [(java.util.Arrays/copyOfRange bs pos (dec end)) end]
+      (let [result (byte-array len)]
+        (loop [i pos
+               o 0]
+          (when (< o len)
+            (let [b (aget bs i)]
+              (aset result o b)
+              (recur (if (zero? b) (+ i 2) (inc i))
+                     (inc o)))))
+        [result end]))))
+
+(defn- read-escaped-string
+  "Reads an escaped region as a UTF-8 string. In the no-escape case the
+   String is built directly on the source array, skipping the intermediate
+   byte array `read-escaped` would allocate."
+  [^bytes bs ^long pos]
+  (let [[len end] (unescaped-length bs pos)
+        len (long len)
+        end (long end)]
+    (if (= len (- end 1 pos))
+      [(String. bs (int pos) (int len) java.nio.charset.StandardCharsets/UTF_8) end]
+      (let [[^bytes raw end] (read-escaped bs pos)]
+        [(String. raw java.nio.charset.StandardCharsets/UTF_8) end]))))
 
 (defn- read-be
   "Reads `len` bytes big-endian as an unsigned long (len <= 8)."
@@ -532,8 +551,7 @@
       (= code type-false) [false pos]
 
       (= code type-string)
-      (let [[^bytes raw end] (read-escaped bs pos)]
-        [(String. raw java.nio.charset.StandardCharsets/UTF_8) end])
+      (read-escaped-string bs pos)
 
       (= code type-bytes)
       (read-escaped bs pos)
