@@ -65,26 +65,59 @@
 ;; ---------------------------------------------------------------------------
 ;; encoding
 
+(definterface IByteBuf
+  (^void writeByte [^long b])
+  (^void writeBytes [^bytes bs ^long off ^long n])
+  (^bytes toBytes []))
+
+;; unsynchronized replacement for ByteArrayOutputStream: pack runs four
+;; times per datom on every transact plus for every range bound, and
+;; BAOS.write takes a monitor per byte
+(deftype ByteBuf [^:unsynchronized-mutable ^bytes buf
+                  ^:unsynchronized-mutable ^long len]
+  IByteBuf
+  (writeByte [_ b]
+    (when (= len (alength buf))
+      (set! buf (java.util.Arrays/copyOf buf (* 2 (alength buf)))))
+    (aset buf len (unchecked-byte b))
+    (set! len (inc len)))
+  (writeBytes [_ bs off n]
+    (let [need (+ len n)]
+      (when (< (alength buf) need)
+        (loop [cap (* 2 (alength buf))]
+          (if (< cap need)
+            (recur (* 2 cap))
+            (set! buf (java.util.Arrays/copyOf buf cap))))))
+    (System/arraycopy bs off buf len n)
+    (set! len (+ len n)))
+  (toBytes [_]
+    (java.util.Arrays/copyOf buf len)))
+
 (defn- write-escaped
   "Writes `bs` with 0x00 escaped as 0x00 0xFF, then a 0x00 terminator.
-   The escaping keeps the bytes self-delimiting while preserving order."
-  [^java.io.ByteArrayOutputStream out ^bytes bs]
+   The escaping keeps the bytes self-delimiting while preserving order.
+   Bulk-copies the chunks between NULs; the common case (no NUL at all)
+   is a single copy."
+  [^IByteBuf out ^bytes bs]
   (let [n (alength bs)]
-    (loop [i 0]
-      (when (< i n)
-        (let [b (aget bs i)]
-          (.write out (int b))
-          (when (zero? b)
-            (.write out 0xff)))
-        (recur (inc i)))))
-  (.write out 0x00))
+    (loop [start 0
+           i 0]
+      (if (< i n)
+        (if (zero? (aget bs i))
+          (do ;; include the 0x00 itself in the chunk, then its 0xFF escape
+              (.writeBytes out bs start (- (inc i) start))
+              (.writeByte out 0xff)
+              (recur (inc i) (inc i)))
+          (recur start (inc i)))
+        (.writeBytes out bs start (- n start)))))
+  (.writeByte out 0x00))
 
 (defn- write-be
   "Writes the lowest `len` bytes of `n` big-endian."
-  [^java.io.ByteArrayOutputStream out ^long n ^long len]
+  [^IByteBuf out ^long n ^long len]
   (loop [shift (* 8 (dec len))]
     (when (<= 0 shift)
-      (.write out (int (bit-and 0xff (unsigned-bit-shift-right n shift))))
+      (.writeByte out (int (bit-and 0xff (unsigned-bit-shift-right n shift))))
       (recur (- shift 8)))))
 
 (defn- magnitude-length
@@ -96,19 +129,19 @@
       (quot (+ bits 7) 8))))
 
 (defn- write-long-value
-  [^java.io.ByteArrayOutputStream out ^long n]
+  [^IByteBuf out ^long n]
   (cond
     (zero? n)
-    (.write out type-int-zero)
+    (.writeByte out type-int-zero)
 
     (pos? n)
     (let [len (magnitude-length n)]
-      (.write out (int (+ type-int-zero len)))
+      (.writeByte out (int (+ type-int-zero len)))
       (write-be out n len))
 
     :else
     (let [len (magnitude-length n)]
-      (.write out (int (- type-int-zero len)))
+      (.writeByte out (int (- type-int-zero len)))
       ;; offset encoding: n + 2^(8*len) - 1; for len 8 the addition of 2^64
       ;; is a no-op in 64-bit two's complement, so it reduces to n - 1
       (write-be out
@@ -132,7 +165,7 @@
    the long range - the type code encodes the magnitude length, not the
    value range); only longer magnitudes use the bignum type codes with an
    explicit length byte."
-  [^java.io.ByteArrayOutputStream out ^java.math.BigInteger n]
+  [^IByteBuf out ^java.math.BigInteger n]
   (if (<= (.bitLength n) 63)
     (write-long-value out (.longValueExact n))
     (let [^bytes magnitude (bigint-magnitude-bytes (.abs n))
@@ -142,45 +175,45 @@
                         {:value n})))
       (if (pos? (.signum n))
         (do (if (<= len 8)
-              (.write out (int (+ type-int-zero len)))
-              (do (.write out type-pos-bignum)
-                  (.write out (int len))))
-            (.write out magnitude 0 (int len)))
+              (.writeByte out (int (+ type-int-zero len)))
+              (do (.writeByte out type-pos-bignum)
+                  (.writeByte out (int len))))
+            (.writeBytes out magnitude 0 len))
         ;; offset encoding like small negative ints: n + 2^(8*len) - 1
         (let [offset (.subtract (.shiftLeft java.math.BigInteger/ONE (int (* 8 len)))
                                 java.math.BigInteger/ONE)
               ^bytes adjusted (bigint-magnitude-bytes (.add n offset))]
           (if (<= len 8)
-            (.write out (int (- type-int-zero len)))
-            (do (.write out type-neg-bignum)
-                (.write out (int (bit-xor len 0xff)))))
+            (.writeByte out (int (- type-int-zero len)))
+            (do (.writeByte out type-neg-bignum)
+                (.writeByte out (int (bit-xor len 0xff)))))
           ;; the adjusted value may need fewer bytes than the magnitude;
           ;; left-pad with zeros to keep the width the type code claims
           (dotimes [_ (- len (alength adjusted))]
-            (.write out 0x00))
-          (.write out adjusted 0 (alength adjusted)))))))
+            (.writeByte out 0x00))
+          (.writeBytes out adjusted 0 (alength adjusted)))))))
 
 (defn- write-double-value
   ;; raw bits, like fdb-java: doubleToLongBits would canonicalize NaN
   ;; payloads, so a decoded legacy NaN would re-encode to different bytes
   ;; than its stored key and e.g. never cancel on retraction
-  [^java.io.ByteArrayOutputStream out ^double d]
+  [^IByteBuf out ^double d]
   (let [bits (Double/doubleToRawLongBits d)
         ;; sign bit set: flip all bits; else: flip only the sign bit -
         ;; makes the IEEE bytes sort in numeric order
         bits (if (neg? bits)
                (bit-not bits)
                (bit-xor bits Long/MIN_VALUE))]
-    (.write out type-double)
+    (.writeByte out type-double)
     (write-be out bits 8)))
 
 (defn- write-float-value
-  [^java.io.ByteArrayOutputStream out ^Float f]
+  [^IByteBuf out ^Float f]
   (let [bits (Float/floatToRawIntBits (float f))
         bits (if (neg? bits)
                (bit-not bits)
                (bit-xor bits Integer/MIN_VALUE))]
-    (.write out type-float)
+    (.writeByte out type-float)
     (write-be out (bit-and bits 0xffffffff) 4)))
 
 (defn- canonical-decimal
@@ -239,11 +272,11 @@
    The adjusted exponent must fit an int32 (only violated near BigDecimal's
    scale limits, e.g. 1E+2147483647M); beyond that the offset encoding would
    wrap and mis-sort, so such values are rejected."
-  [^java.io.ByteArrayOutputStream out ^java.math.BigDecimal d]
-  (.write out type-decimal)
+  [^IByteBuf out ^java.math.BigDecimal d]
+  (.writeByte out type-decimal)
   (let [d (canonical-decimal d)]
     (if (zero? (.signum d))
-      (.write out decimal-zero)
+      (.writeByte out decimal-zero)
       (let [abs (.abs d)
             digits (str (.unscaledValue abs))
             exponent (- (.precision abs) (.scale abs))
@@ -253,7 +286,7 @@
                                  :adjusted-exponent exponent})))
             negative? (neg? (.signum d))
             mask (if negative? 0xff 0x00)]
-        (.write out (int (if negative?
+        (.writeByte out (int (if negative?
                            decimal-negative
                            decimal-positive)))
         (write-be out
@@ -261,9 +294,9 @@
                            (* mask 0x01010101))
                   4)
         (dotimes [i (.length digits)]
-          (.write out (int (bit-xor (inc (- (int (.charAt digits i)) (int \0)))
+          (.writeByte out (int (bit-xor (inc (- (int (.charAt digits i)) (int \0)))
                                     mask))))
-        (.write out (int (bit-xor 0x00 mask)))))))
+        (.writeByte out (int (bit-xor 0x00 mask)))))))
 
 (defn utf8-bytes
   "Encodes `s` as UTF-8, rejecting unpaired surrogates instead of silently
@@ -293,23 +326,23 @@
     (.getBytes s java.nio.charset.StandardCharsets/UTF_8)))
 
 (defn- write-value
-  [^java.io.ByteArrayOutputStream out x nested?]
+  [^IByteBuf out x nested?]
   (cond
     (nil? x)
-    (do (.write out type-null)
+    (do (.writeByte out type-null)
         (when nested?
-          (.write out 0xff)))
+          (.writeByte out 0xff)))
 
     (string? x)
-    (do (.write out type-string)
+    (do (.writeByte out type-string)
         (write-escaped out (utf8-bytes x)))
 
     (bytes? x)
-    (do (.write out type-bytes)
+    (do (.writeByte out type-bytes)
         (write-escaped out x))
 
     (instance? Boolean x)
-    (.write out (int (if x type-true type-false)))
+    (.writeByte out (int (if x type-true type-false)))
 
     (instance? Long x) (write-long-value out x)
     (instance? Integer x) (write-long-value out (long x))
@@ -323,15 +356,15 @@
     (instance? java.math.BigDecimal x) (write-decimal out x)
 
     (uuid? x)
-    (do (.write out type-uuid)
+    (do (.writeByte out type-uuid)
         (write-be out (.getMostSignificantBits ^java.util.UUID x) 8)
         (write-be out (.getLeastSignificantBits ^java.util.UUID x) 8))
 
     (instance? java.util.List x)
-    (do (.write out type-nested)
+    (do (.writeByte out type-nested)
         (doseq [item x]
           (write-value out item true))
-        (.write out 0x00))
+        (.writeByte out 0x00))
 
     :else
     ;; reject instead of guessing - the FoundationDB Java tuple layer's
@@ -366,10 +399,10 @@
   "Encodes the tuple `components` (a sequential collection) into a byte
    array that sorts in unsigned lexicographic byte order."
   ^bytes [components]
-  (let [out (java.io.ByteArrayOutputStream. 64)]
+  (let [out (ByteBuf. (byte-array 64) 0)]
     (doseq [x components]
       (write-value out x false))
-    (.toByteArray out)))
+    (.toBytes out)))
 
 ;; ---------------------------------------------------------------------------
 ;; decoding
