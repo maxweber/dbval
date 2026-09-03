@@ -420,14 +420,6 @@
 
 ;; ----------------------------------------------------------------------------
 
-(defn tuple
-  "Turns the `components` into a tuple (a vector) for the order-preserving
-   byte encoding in `dbval.tuple`."
-  [& components]
-  ;; & rest args are nil when empty; empty tuples occur when an empty
-  ;; vector is stored as a value
-  (vec components))
-
 (defn serialize-tuple
   [attr x]
   (cond
@@ -438,9 +430,8 @@
     (pr-str x)
 
     (sequential? x)
-    (apply tuple
-           (map (fn [item] (serialize-tuple attr item))
-                x))
+    (mapv (fn [item] (serialize-tuple attr item))
+          x)
 
     (tuple-codec/supported-value? x)
     x
@@ -598,23 +589,11 @@
                           e)))))))
 
 (defn tuple-range
-  "Turns the `components` into a tuple and returns a vector of the begin
-   and end of the tuple's range."
+  "Returns a vector of the begin and end of the range covering the tuples
+   that extend the `components`."
   [& components]
-  (tuple-codec/range (vec components)))
-
-(defn datom-tuple
-  "Converts a datom to a tuple and sorts the components according to the
-   `order`."
-  ([db order datom]
-   (apply tuple
-          (tuple-list db
-                      order
-                      datom)))
-  ([db datom]
-   (datom-tuple db
-                :eavt
-                datom)))
+  ;; & rest args are nil when empty; (tuple-range) covers the whole store
+  (tuple-codec/range components))
 
 (defn deserialize-tuple
   [x]
@@ -2069,17 +2048,17 @@
                    (nil? (.-inline-str ^BlobRef (.-v datom))))
           (stage-blob! db (.-v datom)))
         (-> db
-            (set-add! pending (datom-tuple db :eavt datom))
-            (set-add! pending (datom-tuple db :aevt datom))
-            (cond-> indexing? (set-add! pending (datom-tuple db :avet datom)))
-            (set-add! pending (datom-tuple db :teav datom))))
+            (set-add! pending (tuple-list db :eavt datom))
+            (set-add! pending (tuple-list db :aevt datom))
+            (cond-> indexing? (set-add! pending (tuple-list db :avet datom)))
+            (set-add! pending (tuple-list db :teav datom))))
       (if-some [removing (some-> (find-exact-datom db (.-e datom) (.-a datom) (.-v datom))
                                  (retract-datom (:tx datom)))]
         (-> db
-            (set-add! pending (datom-tuple db :eavt removing))
-            (set-add! pending (datom-tuple db :aevt removing))
-            (cond-> indexing? (set-add! pending (datom-tuple db :avet removing)))
-            (set-add! pending (datom-tuple db :teav removing)))
+            (set-add! pending (tuple-list db :eavt removing))
+            (set-add! pending (tuple-list db :aevt removing))
+            (cond-> indexing? (set-add! pending (tuple-list db :avet removing)))
+            (set-add! pending (tuple-list db :teav removing)))
         db))))
 
 (defn- queue-tuple [queue tuple idx db e a v]
