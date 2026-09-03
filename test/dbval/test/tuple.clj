@@ -44,6 +44,8 @@
      (gen/fmap #(.multiply (java.math.BigInteger/valueOf %)
                            (java.math.BigInteger/valueOf Long/MAX_VALUE))
                gen/large-integer)
+     ;; NaN is excluded because the round-trip spec compares with = (NaN
+     ;; never equals itself); test-nan-byte-compatibility covers NaN bits
      (gen/double* {:NaN? false})
      (gen/fmap float (gen/double* {:NaN? false
                                    :min -3.0e38
@@ -172,6 +174,25 @@
   (is (thrown? clojure.lang.ExceptionInfo
         (tuple/pack [(java.util.concurrent.atomic.AtomicLong. 5)])))
   (is (thrown? clojure.lang.ExceptionInfo (tuple/pack [\a]))))
+
+(deftest test-nan-byte-compatibility
+  ;; NaN payload bits are packed raw, matching fdb-java; doubleToLongBits
+  ;; would canonicalize every NaN, breaking byte compatibility and
+  ;; re-encode idempotency for legacy NaN datoms
+  (doseq [d [(Double/longBitsToDouble 0x7ff8000000000001)
+             (Double/longBitsToDouble (unchecked-long 0xfff8000000000000))
+             (Double/longBitsToDouble (unchecked-long 0xfff0000000000123))
+             Double/NaN]]
+    (is (java.util.Arrays/equals (tuple/pack [d]) (fdb-pack [d]))
+        (str "double NaN bits " (Long/toHexString (Double/doubleToRawLongBits d))))
+    (let [[decoded] (tuple/unpack (tuple/pack [d]))]
+      (is (java.util.Arrays/equals (tuple/pack [d]) (tuple/pack [decoded]))
+          "re-encoding a decoded NaN must reproduce the stored bytes")))
+  (doseq [f [(Float/intBitsToFloat (unchecked-int 0xffc00001))
+             (Float/intBitsToFloat 0x7fc00001)
+             Float/NaN]]
+    (is (java.util.Arrays/equals (tuple/pack [f]) (fdb-pack [f]))
+        (str "float NaN bits " (Integer/toHexString (Float/floatToRawIntBits f))))))
 
 (deftest test-long-boundaries
   (doseq [n [0 1 -1 255 256 -255 -256 65535 65536 -65536

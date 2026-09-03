@@ -152,8 +152,11 @@
           (.write out adjusted 0 (alength adjusted)))))))
 
 (defn- write-double-value
+  ;; raw bits, like fdb-java: doubleToLongBits would canonicalize NaN
+  ;; payloads, so a decoded legacy NaN would re-encode to different bytes
+  ;; than its stored key and e.g. never cancel on retraction
   [^java.io.ByteArrayOutputStream out ^double d]
-  (let [bits (Double/doubleToLongBits d)
+  (let [bits (Double/doubleToRawLongBits d)
         ;; sign bit set: flip all bits; else: flip only the sign bit -
         ;; makes the IEEE bytes sort in numeric order
         bits (if (neg? bits)
@@ -164,7 +167,7 @@
 
 (defn- write-float-value
   [^java.io.ByteArrayOutputStream out ^Float f]
-  (let [bits (Float/floatToIntBits (float f))
+  (let [bits (Float/floatToRawIntBits (float f))
         bits (if (neg? bits)
                (bit-not bits)
                (bit-xor bits Integer/MIN_VALUE))]
