@@ -391,23 +391,100 @@
       (subvec [e' a v' tx' added] 0 (count pattern)))
     pattern))
 
+(defn- bound-v-vals
+  "When the pattern's v position holds a variable already bound in the
+   context and a plain scan-and-hash-join would silently drop matches,
+   returns the distinct bound values to look the pattern up by; otherwise
+   nil. The join drops matches in two cases: datoms of a deref attribute
+   carry BlobRefs that never hash-join against raw bound values, and
+   BigDecimals hash-join by the scale-sensitive hashCode although their =
+   is scale-insensitive (0.5M vs 0.50M)."
+  [context db pattern]
+  (let [[e-el _ v-el tx-el added-el] pattern]
+    (when (and (free-var? v-el)
+               ;; a variable repeated across positions keeps the default
+               ;; path, which has the established semantics for that shape
+               (not= v-el e-el)
+               (not= v-el tx-el)
+               (not= v-el added-el))
+      (when-some [rel (rel-with-attr context v-el)]
+        (let [a-el (nth (substitute-constants context pattern) 1)]
+          (when (attr? a-el)
+            (let [getter (getter-fn (:attrs rel) v-el)
+                  tuples (:tuples rel)
+                  ;; streaming decision first: the common shapes that keep
+                  ;; the default scan-and-hash-join path must not pay for
+                  ;; materializing a distinct set of the bound values
+                  pushdown? (if (db/deref-attr? db a-el)
+                              ;; bound BlobRefs (e.g. from another deref
+                              ;; pattern) hash-join fine; only raw values
+                              ;; need the per-value lookup
+                              (some (fn [t] (not (db/blob-ref? (getter t))))
+                                    tuples)
+                              (some (fn [t] (decimal? (getter t))) tuples))]
+              (when pushdown?
+                (into [] (comp (map getter) (distinct)) tuples)))))))))
+
+(defn- lookup-pattern-bound-v
+  "Builds the pattern's relation by searching once per bound value of the
+   v variable and binding the v column to that bound value instead of the
+   datom's value, so the later hash-join with the binding relation matches.
+   The v column therefore carries the caller's own representation - the
+   raw value instead of a deref attribute's BlobRef, the caller's scale
+   instead of a BigDecimal's canonical scale."
+  [context db pattern vals]
+  (let [v-el      (nth pattern 2)
+        base      (->> pattern
+                    (substitute-constants context)
+                    (resolve-pattern-lookup-refs db)
+                    (mapv #(if (or (= % '_) (free-var? %)) nil %)))
+        added     (nth base 4 nil)
+        n         (min 4 (count base))
+        var+props (->> (map vector pattern ["e" "a" "v" "tx" "added"])
+                    (filterv (fn [[s _]] (free-var? s))))
+        attrs     (into {} (map-indexed (fn [i [s _]] [s i]) var+props))
+        tuples    (into []
+                    (mapcat
+                      (fn [val]
+                        (let [sp     (assoc base 2 val)
+                              datoms (db/-search db (subvec sp 0 n))
+                              datoms (if (some? added)
+                                       (filter #(= (:added %) (boolean added))
+                                               datoms)
+                                       datoms)]
+                          (map (fn [d]
+                                 (let [arr (object-array (count var+props))]
+                                   (reduce-kv
+                                     (fn [_ i [s prop]]
+                                       (aset arr i (if (= s v-el)
+                                                     val
+                                                     (get d prop)))
+                                       nil)
+                                     nil var+props)
+                                   arr))
+                               datoms))))
+                    vals)]
+    (Relation. attrs tuples)))
+
 (defn lookup-pattern-db [context db pattern]
   ;; TODO optimize with bound attrs min/max values here
-  (let [search-pattern (->> pattern
-                         (substitute-constants context)
-                         (resolve-pattern-lookup-refs db)
-                         (mapv #(if (or (= % '_) (free-var? %)) nil %)))
-        ;; like Datomic, a 5th pattern element binds the assert/retract flag
-        ;; (mostly useful on `history` dbs, where retract datoms are visible)
-        added          (nth search-pattern 4 nil)
-        datoms         (db/-search db (subvec search-pattern 0 (min 4 (count search-pattern))))
-        datoms         (if (some? added)
-                         (filter #(= (:added %) (boolean added)) datoms)
-                         datoms)
-        attr->prop     (->> (map vector pattern ["e" "a" "v" "tx" "added"])
-                         (filter (fn [[s _]] (free-var? s)))
-                         (into {}))]
-    (Relation. attr->prop datoms)))
+  (if-some [vals (bound-v-vals context db pattern)]
+    (lookup-pattern-bound-v context db pattern vals)
+    (let [search-pattern (->> pattern
+                           (substitute-constants context)
+                           (resolve-pattern-lookup-refs db)
+                           (mapv #(if (or (= % '_) (free-var? %)) nil %)))
+          ;; like Datomic, a 5th pattern element binds the assert/retract flag
+          ;; (mostly useful on `history` dbs, where retract datoms are visible)
+          added          (nth search-pattern 4 nil)
+          datoms         (db/-search db (subvec search-pattern 0 (min 4 (count search-pattern))))
+          datoms         (if (some? added)
+                           (filter #(= (:added %) (boolean added)) datoms)
+                           datoms)
+          attr->prop     (->> (map vector pattern ["e" "a" "v" "tx" "added"])
+                           (filter (fn [[s _]] (free-var? s)))
+                           (into {}))]
+      (Relation. attr->prop datoms))))
 
 (defn matches-pattern? [pattern tuple]
   (loop [tuple   tuple

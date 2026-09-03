@@ -639,3 +639,15 @@
         e (ffirst (d/q '[:find ?e :where [?e :foo "bar"]] db))]
     (is (uuid? e))
     (is (= "bar" (:foo (d/entity db e))))))
+
+(deftest test-bigdec-canonical-representative
+  ;; the datom carries the canonical representative, so :tx-data reports
+  ;; the value every later read returns (a 19.90M datom would otherwise
+  ;; round-trip as 19.9M only on the read side, and tx listeners or audit
+  ;; trails would record a value that never reads back)
+  (let [conn (d/create-conn)
+        tx (d/transact! conn [{:db/id "e1" :amount 19.90M}])
+        added (first (filter (fn [d] (= :amount (:a d))) (:tx-data tx)))]
+    (is (= 1 (.scale ^java.math.BigDecimal (:v added))))
+    (is (= "19.9" (str (:v added))))
+    (is (= "19.9" (str (d/q '[:find ?v . :where [_ :amount ?v]] @conn))))))

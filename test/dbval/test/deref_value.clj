@@ -214,3 +214,56 @@
     (let [conn (d/conn-from-db (d/empty-db schema {:db-file db-file}))]
       (is (= model-v1 @(:doc/model (d/entity @conn [:doc/name "a"]))))
       (store/close! (db/db-store @conn)))))
+
+(deftest test-bigdec-scale-variants
+  ;; deref attributes hash the canonical representative, giving them the
+  ;; same numeric equality the byte encoding gives inline attributes:
+  ;; 0.50M finds, deduplicates and retracts against a stored 0.5M
+  (let [conn (conn)]
+    (d/transact! conn [{:doc/name "a" :doc/model 0.5M}
+                       {:doc/name "b" :doc/model 0.50M}])
+    (let [ea (:db/id (d/entity @conn [:doc/name "a"]))
+          eb (:db/id (d/entity @conn [:doc/name "b"]))]
+      (testing "an index lookup with the other scale finds the datom"
+        (is (= 1 (count (vec (d/datoms @conn :eavt ea :doc/model 0.50M))))))
+      (testing "both scales hash to the same blob"
+        (is (= (:doc/model (d/entity @conn ea))
+               (:doc/model (d/entity @conn eb)))))
+      (testing "retracting with the other scale removes the datom"
+        (d/transact! conn [[:db/retract ea :doc/model 0.50M]])
+        (is (empty? (vec (d/datoms @conn :eavt ea :doc/model))))))))
+
+(deftest test-bound-values-in-queries
+  ;; a bound ?v against a deref attribute used to find nothing: the
+  ;; pattern relation carried BlobRefs that never hash-joined against the
+  ;; raw bound value. The pattern is now looked up per bound value.
+  (let [conn (conn)]
+    (d/transact! conn [{:doc/name "a" :doc/model 0.5M}
+                       {:doc/name "b" :doc/model {:x 1}}
+                       {:doc/name "c" :doc/model 0.5M}])
+    (let [ea (:db/id (d/entity @conn [:doc/name "a"]))
+          eb (:db/id (d/entity @conn [:doc/name "b"]))
+          ec (:db/id (d/entity @conn [:doc/name "c"]))]
+      (testing "scalar input, both scale representations"
+        (is (= #{[ea] [ec]}
+               (d/q '[:find ?e :in $ ?v :where [?e :doc/model ?v]]
+                    @conn 0.5M)))
+        (is (= #{[ea] [ec]}
+               (d/q '[:find ?e :in $ ?v :where [?e :doc/model ?v]]
+                    @conn 0.50M))))
+      (testing "non-numeric deref values"
+        (is (= eb (d/q '[:find ?e . :in $ ?v :where [?e :doc/model ?v]]
+                       @conn {:x 1}))))
+      (testing "collection binding"
+        (is (= #{[ea] [eb] [ec]}
+               (d/q '[:find ?e :in $ [?v ...] :where [?e :doc/model ?v]]
+                    @conn [0.50M {:x 1}]))))
+      (testing "unmatched values stay unmatched"
+        (is (nil? (d/q '[:find ?e . :in $ ?v :where [?e :doc/model ?v]]
+                       @conn 0.6M))))
+      (testing "joining two deref patterns through ?v still works"
+        (is (contains? (d/q '[:find ?x ?y
+                              :where [?x :doc/model ?v]
+                                     [?y :doc/model ?v]]
+                            @conn)
+                       [ea ec]))))))

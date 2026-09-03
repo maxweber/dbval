@@ -302,3 +302,16 @@
     (is (= [1 #{[e5 :b]}] (cnt+q '[:find ?e ?a :in $ ?v :where [?e ?a ?v]] db "5b")))
     (is (= [1 #{[e5 :b]}] (cnt+q '[:find ?e ?a :in $ [?v ...] :where [?e ?a ?v]] db ["5b"])))
     (is (= [1 #{[e5 :b]}] (cnt+q '[:find ?e ?a :where [(ground "5b") ?v] [?e ?a ?v]] db)))))
+
+(deftest test-bigdec-bound-values
+  ;; hash-join buckets by hashCode, which is scale-sensitive for
+  ;; BigDecimals although their = is not; bound decimal values are
+  ;; therefore looked up per value instead of scanned and joined
+  (let [db (d/db-with (d/empty-db)
+                      [{:db/id "e1" :amount 0.5M :name "a"}])]
+    (is (= "a" (d/q '[:find ?n . :in $ ?v :where
+                      [?e :amount ?v] [?e :name ?n]]
+                    db 0.50M)))
+    (is (= #{["a"]} (d/q '[:find ?n :in $ [?v ...] :where
+                           [?e :amount ?v] [?e :name ?n]]
+                         db [0.50M 7M])))))

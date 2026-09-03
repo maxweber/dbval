@@ -6,6 +6,7 @@
     [dbval.inline :refer [update]]
     [dbval.lru :as lru]
     [dbval.store :as store]
+    [dbval.tuple :as tuple-codec]
     [dbval.util :as util]
     [dbval.arrays :as arrays]
     [com.yetanalytics.squuid :as squuid]
@@ -408,35 +409,16 @@
   [db v]
   (if (blob-ref? v)
     v
-    (let [^bytes bs (.getBytes (pr-str v) java.nio.charset.StandardCharsets/UTF_8)]
+    ;; canonical representative first: pr-str is scale-sensitive, and
+    ;; 0.50M must hash to the same blob as 0.5M - the byte encoder gives
+    ;; inline attributes exactly that equality. Strict UTF-8: getBytes
+    ;; would replace an unpaired surrogate with '?', silently hashing
+    ;; distinct values to the same blob.
+    (let [v (tuple-codec/canonical-value v)
+          ^bytes bs (tuple-codec/utf8-bytes (pr-str v))]
       (BlobRef. db (sha-256 bs) bs nil v))))
 
 ;; ----------------------------------------------------------------------------
-
-(defn ^com.apple.foundationdb.tuple.Tuple tuple
-  "Turns the `components` into a `com.apple.foundationdb.tuple.Tuple`."
-  [& components]
-  ;; & rest args are nil when empty, but addAll requires a List;
-  ;; empty tuples occur when an empty vector is stored as a value
-  (let [^java.util.List components (or components ())]
-    (.addAll (com.apple.foundationdb.tuple.Tuple.)
-             components)))
-
-(defn serialize-tuple
-  [x]
-  (cond
-    (or (keyword? x)
-        (symbol? x)
-        (string? x)
-        (instance? java.util.Date x))
-    (pr-str x)
-
-    (sequential? x)
-    (apply tuple
-           (map serialize-tuple
-                x))
-    :else
-    x))
 
 (def max-inline-value-bytes
   "Maximum size of a serialized value inside an index key. Values are stored
@@ -462,6 +444,69 @@
        :length (.length s)}))
   s)
 
+(defn- validate-inline-string
+  ;; surrogate check here, not only in the byte encoder: raising at the
+  ;; serialization boundary carries the attribute and skips the
+  ;; "set-add! failed"/"pack failed" wrappers that would dump the datom
+  ;; into ex-data and logs
+  ^String [attr ^String s]
+  (let [i (tuple-codec/unpaired-surrogate-index s)]
+    (when-not (neg? i)
+      (util/raise "Value of attribute " attr " contains an unpaired "
+                  "surrogate at char " i " and has no UTF-8 encoding (a "
+                  "typical source is a string truncated in the middle of "
+                  "an emoji by subs)."
+        {:error :transact/invalid-string
+         :attribute attr
+         :char-index i})))
+  (validate-inline-size attr s))
+
+(defn- validate-decimal-size
+  ;; the encoded decimal is one byte per significant digit plus 7 framing
+  ;; bytes (see dbval.tuple/write-decimal); trailing zeros are stripped
+  ;; before encoding, so only the stripped precision counts. Every other
+  ;; numeric encoding is <= 9 bytes - this is the one number type whose key
+  ;; size grows with the value, so it needs the same bound as strings.
+  ^java.math.BigDecimal [attr ^java.math.BigDecimal d]
+  (let [digits (.precision (.stripTrailingZeros d))]
+    (when (> (+ digits 7) max-inline-value-bytes)
+      (util/raise "Value of attribute " attr " has " digits " significant "
+                  "digits and serializes to more than " max-inline-value-bytes
+                  " bytes; it cannot be stored inside index keys. Flag the "
+                  "attribute with {:dbval/deref true} to store its values "
+                  "in the blob area instead."
+        {:error :transact/value-too-large
+         :attribute attr
+         :digits digits})))
+  d)
+
+(defn serialize-tuple
+  [attr x]
+  (cond
+    (or (keyword? x)
+        (symbol? x)
+        (string? x)
+        (instance? java.util.Date x))
+    ;; nested components need the same guards as top-level values: an
+    ;; oversized or surrogate-carrying string is no better inside a tuple
+    (validate-inline-string attr (pr-str x))
+
+    (sequential? x)
+    (mapv (fn [item] (serialize-tuple attr item))
+          x)
+
+    (tuple-codec/supported-value? x)
+    x
+
+    :else
+    (util/raise "Value of attribute " attr " contains an element of "
+                "unsupported type " (class x) " and cannot be stored inside "
+                "index keys. Flag the attribute with {:dbval/deref true} to "
+                "store arbitrary edn values in the blob area instead."
+      {:error :transact/unsupported-value-type
+       :attribute attr
+       :value-type (class x)})))
+
 (defn serialize-value
   [db attr v]
   (cond
@@ -478,13 +523,28 @@
         (symbol? v)
         (string? v)
         (instance? java.util.Date v))
-    (validate-inline-size attr (pr-str v))
+    (validate-inline-string attr (pr-str v))
 
     (sequential? v)
-    (serialize-tuple v)
+    (serialize-tuple attr v)
+
+    (instance? java.math.BigDecimal v)
+    (validate-decimal-size attr v)
+
+    (tuple-codec/supported-value? v)
+    v
 
     :else
-    v))
+    (util/raise "Value of attribute " attr " has unsupported type " (class v)
+                " and cannot be stored inside index keys. Supported are "
+                "strings, keywords, symbols, maps, dates, booleans, UUIDs, "
+                "byte arrays, integers, bigints, doubles, floats, bigdecs "
+                "and sequential collections of these. Flag the attribute "
+                "with {:dbval/deref true} to store arbitrary edn values in "
+                "the blob area instead."
+      {:error :transact/unsupported-value-type
+       :attribute attr
+       :value-type (class v)})))
 
 (defn attr-sort-key
   "Returns the serialized key used for attribute components in indexes."
@@ -536,37 +596,23 @@
         (list (name order) t e (attr-sort-key a) (serialize-value db a v) added)
         ))
     (catch Exception e
-      (if (= :transact/value-too-large (:error (ex-data e)))
-        ;; pass through unchanged: wrapping would put the oversized datom
-        ;; into ex-data and thereby into every log of the error
-        (throw e)
-        (throw (ex-info "tuple-list failed"
-                        {:order order
-                         :datom datom}
-                        e))))))
+      (let [err (:error (ex-data e))]
+        (if (and (keyword? err) (= "transact" (namespace err)))
+          ;; pass validation anomalies through unchanged: wrapping would put
+          ;; the offending datom into ex-data and thereby into every log of
+          ;; the error
+          (throw e)
+          (throw (ex-info "tuple-list failed"
+                          {:order order
+                           :datom datom}
+                          e)))))))
 
 (defn tuple-range
-  "Turns the `components` into a `com.apple.foundationdb.tuple.Tuple` and returns
-   a vector of the begin and end of the tuple's range."
+  "Returns a vector of the begin and end of the range covering the tuples
+   that extend the `components`."
   [& components]
-  (let [r (.range ^com.apple.foundationdb.tuple.Tuple
-                  (apply tuple
-                         components))]
-    [(.begin r)
-     (.end r)]))
-
-(defn ^com.apple.foundationdb.tuple.Tuple datom-tuple
-  "Converts a datom to a `com.apple.foundationdb.tuple.Tuple` and sorts the
-   components according to the `order`."
-  ([db order datom]
-   (apply tuple
-          (tuple-list db
-                      order
-                      datom)))
-  ([db datom]
-   (datom-tuple db
-                :eavt
-                datom)))
+  ;; & rest args are nil when empty; (tuple-range) covers the whole store
+  (tuple-codec/range components))
 
 (defn deserialize-tuple
   [x]
@@ -602,7 +648,7 @@
           v)))))
 
 (defn datom-from-tuple
-  "Reads back a datom that was stored as `com.apple.foundationdb.tuple.Tuple`."
+  "Reads back a datom that was stored as an encoded tuple."
   [db tuple]
   (try
     (let [[order c0 c1 c2 c3 c4] (vec tuple)]
@@ -625,9 +671,9 @@
                       e)))))
 
 (defn tuple-from-bytes
-  "Converts a byte array into a `com.apple.foundationdb.tuple.Tuple`."
+  "Converts a byte array back into a tuple (a vector of components)."
   [^bytes bytes]
-  (com.apple.foundationdb.tuple.Tuple/fromBytes bytes))
+  (tuple-codec/unpack bytes))
 
 (defn bytes-to-datoms-xf
   [db]
@@ -637,17 +683,16 @@
    tuple-from-bytes))
 
 (defn bytes-to-datoms
-  "Converts a collection of byte array (`com.apple.foundationdb.tuple.Tuple`) into
-   datoms."
+  "Converts a collection of byte arrays (encoded tuples) into datoms."
   [db byte-tuples]
   (->Eduction
    (map (bytes-to-datoms-xf db))
    byte-tuples))
 
 (defn pack
-  [^com.apple.foundationdb.tuple.Tuple tuple]
+  [tuple]
   (try
-    (.pack tuple)
+    (tuple-codec/pack tuple)
     (catch Exception e
       (throw (ex-info "pack failed"
                       {:tuple tuple}
@@ -1956,14 +2001,41 @@
          tx
          false))
 
+(def max-key-bytes
+  "Hard cap for one encoded index key: SlateDB rejects keys over 64 KiB.
+   The per-value caps (max-inline-value-bytes, the decimal digit bound)
+   catch oversized single components with attribute context; this backstop
+   catches what they cannot see, e.g. a tuple value whose components are
+   each within bounds but sum past the limit."
+  65536)
+
 (defn set-add!
   [db ^java.util.NavigableSet pending tuple]
   (try
-    (.add pending (pack tuple))
+    (let [^bytes bs (pack tuple)]
+      (when (< max-key-bytes (alength bs))
+        (let [attr (edn/read-string
+                     (nth tuple (case (first tuple)
+                                  "eavt" 2, "aevt" 1, "avet" 1, "teav" 3)))]
+          (util/raise "Datom of attribute " attr " encodes to "
+                      (alength bs) " bytes, over the " max-key-bytes
+                      " byte index-key limit. Flag the attribute with "
+                      "{:dbval/deref true} to store its values in the blob "
+                      "area instead."
+            {:error :transact/value-too-large
+             :attribute attr
+             :key-bytes (alength bs)})))
+      (.add pending bs))
     (catch Exception e
-      (throw (ex-info "set-add! failed"
-                      {:tuple tuple}
-                      e))))
+      (let [err (:error (ex-data e))]
+        (if (and (keyword? err) (= "transact" (namespace err)))
+          ;; pass validation anomalies through unchanged: wrapping would put
+          ;; the offending datom into ex-data and thereby into every log of
+          ;; the error
+          (throw e)
+          (throw (ex-info "set-add! failed"
+                          {:tuple tuple}
+                          e))))))
   db)
 
 (defn all-tuples
@@ -2022,17 +2094,17 @@
                    (nil? (.-inline-str ^BlobRef (.-v datom))))
           (stage-blob! db (.-v datom)))
         (-> db
-            (set-add! pending (datom-tuple db :eavt datom))
-            (set-add! pending (datom-tuple db :aevt datom))
-            (cond-> indexing? (set-add! pending (datom-tuple db :avet datom)))
-            (set-add! pending (datom-tuple db :teav datom))))
+            (set-add! pending (tuple-list db :eavt datom))
+            (set-add! pending (tuple-list db :aevt datom))
+            (cond-> indexing? (set-add! pending (tuple-list db :avet datom)))
+            (set-add! pending (tuple-list db :teav datom))))
       (if-some [removing (some-> (find-exact-datom db (.-e datom) (.-a datom) (.-v datom))
                                  (retract-datom (:tx datom)))]
         (-> db
-            (set-add! pending (datom-tuple db :eavt removing))
-            (set-add! pending (datom-tuple db :aevt removing))
-            (cond-> indexing? (set-add! pending (datom-tuple db :avet removing)))
-            (set-add! pending (datom-tuple db :teav removing)))
+            (set-add! pending (tuple-list db :eavt removing))
+            (set-add! pending (tuple-list db :aevt removing))
+            (cond-> indexing? (set-add! pending (tuple-list db :avet removing)))
+            (set-add! pending (tuple-list db :teav removing)))
         db))))
 
 (defn- queue-tuple [queue tuple idx db e a v]
@@ -2226,7 +2298,10 @@
         v         (cond
                     (ref? db a)        (entid-strict db v)
                     (deref-attr? db a) (value->blob-ref db v)
-                    :else              v)
+                    ;; the datom carries the canonical representative
+                    ;; (0.5M, never 0.50M), so tx-data reports the value
+                    ;; every later read returns
+                    :else              (tuple-codec/canonical-value v))
         new-datom (datom e a v tx)
         multival? (multival? db a)
         old-datom ^Datom (if multival?

@@ -34,6 +34,7 @@
     dbval.test.query-return-map
     dbval.test.query-rules
     dbval.test.transact
+    dbval.test.tuple
     dbval.test.tuples
     dbval.test.validation
     dbval.test.upsert
